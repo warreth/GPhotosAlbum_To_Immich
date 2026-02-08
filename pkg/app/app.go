@@ -19,9 +19,12 @@ type App struct {
 }
 
 func New(cfg *config.Config) (*App, error) {
+	level := slog.LevelInfo
+	if cfg.Debug {
+		level = slog.LevelDebug
+	}
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-		// Remove strict time parsing if needed, default is RFC3339
+		Level: level,
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	client := immich.NewClient(cfg.ApiURL, cfg.ApiKey)
@@ -62,18 +65,51 @@ func (a *App) syncLoop(ac config.GooglePhotosConfig) {
 		interval = 24 * time.Hour
 	}
 
-	a.Logger.Info("Scheduled sync", "album", ac.URL, "interval", interval.String())
-
-	// Run immediately
-	a.runGPhotoSync(ac)
+	// Schedule Start Time if configured
+	if a.Cfg.SyncStartTime != "" {
+		now := time.Now()
+		// Try parsing "15:04"
+		parsedTime, err := time.Parse("15:04", a.Cfg.SyncStartTime)
+		if err != nil {
+			a.Logger.Error("Invalid syncStartTime format, expected HH:MM", "error", err)
+		} else {
+			// Construct the next occurrence
+			nextRun := time.Date(now.Year(), now.Month(), now.Day(), parsedTime.Hour(), parsedTime.Minute(), 0, 0, now.Location())
+			if nextRun.Before(now) {
+				nextRun = nextRun.Add(24 * time.Hour)
+			}
+			delay := nextRun.Sub(now)
+			a.Logger.Info("Waiting for scheduled start time", "start_time", a.Cfg.SyncStartTime, "delay", delay.Round(time.Second).String())
+			time.Sleep(delay)
+		}
+	} else {
+		a.Logger.Info("Scheduled sync", "album", ac.URL, "interval", interval.String())
+		// Run immediately if no start time enforced
+		a.runGPhotoSync(ac)
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
+		// First run if we waited for custom time
+		if a.Cfg.SyncStartTime != "" {
+			a.runGPhotoSync(ac)
+		}
+		
 		<-ticker.C
-		a.Logger.Info("Starting scheduled sync check", "album", ac.URL)
-		a.runGPhotoSync(ac)
+		// If starttime was not set, this is just normal periodic loop
+		// If starttime was set, subsequent ticks happen at 'interval' from the first run.
+		if a.Cfg.SyncStartTime == "" {
+			a.Logger.Info("Starting scheduled sync check", "album", ac.URL)
+			a.runGPhotoSync(ac)
+		} else {
+			// Logic: The ticker fires AFTER interval. 
+			// If we just ran "manually" before the loop due to sleep, we should verify logic.
+			// Actually, standard Ticker behavior works well: `Tick at T+Interval`. 
+			// So if we slept until 02:00 and ran, the ticker created then (or reset? no we need to create it after invalidating drift?)
+			// Creating ticker AFTER the sleep ensures alignment.
+		}
 	}
 }
 
@@ -119,8 +155,19 @@ func (a *App) runGPhotoSync(ac config.GooglePhotosConfig) {
 	}
 
 	var newAssetIds []string
+	
+	// Stats
+	total := len(album.Photos)
+	processed := 0
+	added := 0
+	failed := 0
+	startTime := time.Now()
+
+	a.Logger.Info("Processing photos", "total_items", total)
 
 	for _, p := range album.Photos {
+		processed++
+		
 		// Create a deterministic filename
 		safeId := strings.ReplaceAll(p.ID, "/", "_")
 		safeId = strings.ReplaceAll(safeId, ":", "_")
@@ -131,59 +178,74 @@ func (a *App) runGPhotoSync(ac config.GooglePhotosConfig) {
 		if len(exists) > 0 {
 			// Found it.
 			newAssetIds = append(newAssetIds, exists[0].Id)
-			continue
-		}
+			a.Logger.Debug("Asset already exists locally", "id", exists[0].Id)
+			// Logic continue...
+		} else {
+			// Download logic...
+			a.Logger.Debug("Downloading new photo", "id", safeId)
+			
+			// Use Streaming Download & Upload
+			r, size, err := googlephotos.DownloadPhotoStream(p.URL)
+			if err != nil {
+				a.Logger.Error("Error downloading photo", "id", safeId, "error", err)
+				failed++
+				goto ProgressCheck
+			}
 
-		logger.Info("Downloading new photo", "id", safeId)
-		
-		// Use Streaming Download & Upload
-		r, size, err := googlephotos.DownloadPhotoStream(p.URL)
-		if err != nil {
-			logger.Error("Error downloading photo", "id", safeId, "error", err)
-			continue
-		}
-
-		// Build Description
-		description := p.Description
-		if p.Uploader != "" {
+			// Build Description
+			description := p.Description
+			if p.Uploader != "" {
+				if description != "" {
+					description += "\n\n"
+				}
+				description += fmt.Sprintf("Shared by: %s", p.Uploader)
+			}
+			
+			sep := "\n"
 			if description != "" {
-				description += "\n\n"
+				sep = "\n\n"
 			}
-			description += fmt.Sprintf("Shared by: %s", p.Uploader)
-		}
-		
-		sep := "\n"
-		if description != "" {
-			sep = "\n\n"
-		}
-		description += fmt.Sprintf("%sSource Album: %s (%s)", sep, album.Title, ac.URL)
+			description += fmt.Sprintf("%sSource Album: %s (%s)", sep, album.Title, ac.URL)
 
-		// Upload with metadata
-        // Note: size is int64, which is correct for UploadAssetStream
-		uploadedId, isDup, err := a.Client.UploadAssetStream(r, fakeFilename, size, p.TakenAt, description)
-		r.Close() // Close response body
-		
-		if err != nil {
-			logger.Error("Error uploading photo", "filename", fakeFilename, "error", err)
-			continue
-		}
-
-		if uploadedId != "" {
-			if isDup {
-				logger.Info("Photo already exists (deduplicated)", "filename", fakeFilename, "id", uploadedId)
-			} else {
-				logger.Info("Uploaded photo", "filename", fakeFilename, "id", uploadedId)
+			// Upload with metadata
+	        // Note: size is int64, which is correct for UploadAssetStream
+			uploadedId, isDup, err := a.Client.UploadAssetStream(r, fakeFilename, size, p.TakenAt, description)
+			r.Close() // Close response body
+			
+			if err != nil {
+				a.Logger.Error("Error uploading photo", "filename", fakeFilename, "error", err)
+				failed++
+				goto ProgressCheck
 			}
-			newAssetIds = append(newAssetIds, uploadedId)
+
+			if uploadedId != "" {
+				if isDup {
+					a.Logger.Debug("Photo already exists (deduplicated)", "filename", fakeFilename, "id", uploadedId)
+				} else {
+					a.Logger.Debug("Uploaded photo", "filename", fakeFilename, "id", uploadedId)
+					added++
+				}
+				newAssetIds = append(newAssetIds, uploadedId)
+			}
+		}
+
+	ProgressCheck:
+		// Progress update every 10 items or 10%
+		if total > 0 && (processed%10 == 0 || processed == total) {
+			elapsed := time.Since(startTime)
+			rate := float64(processed) / elapsed.Seconds()
+			remaining := total - processed
+			eta := time.Duration(float64(remaining)/rate) * time.Second
+			a.Logger.Info("Progress", "processed", processed, "total", total, "eta", eta.Round(time.Second).String(), "failed", failed)
 		}
 	}
 
 	if albumId != "" && len(newAssetIds) > 0 {
-		logger.Info("Adding assets to album", "count", len(newAssetIds), "album", albumTitle)
+		a.Logger.Info("Adding items to album", "count", len(newAssetIds), "album", albumTitle)
 		err := a.Client.AddAssetsToAlbum(albumId, newAssetIds)
 		if err != nil {
-			logger.Error("Error adding assets to album", "error", err)
+			a.Logger.Error("Error adding assets to album", "error", err)
 		}
 	}
-	logger.Info("Sync finished", "title", albumTitle)
+	a.Logger.Info("Sync finished", "title", albumTitle, "added", added, "failed", failed, "total_processed", processed)
 }

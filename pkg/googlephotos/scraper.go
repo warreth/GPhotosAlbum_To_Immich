@@ -67,16 +67,69 @@ func ScrapeAlbum(url string) (*Album, error) {
 	title = strings.TrimSpace(title)
 	title = strings.TrimSuffix(title, " 📸")
 
-	// Regex to extract the data array passed to AF_initDataCallback for 'ds:1' (photos)
-	// We matched `key: 'ds:1' ... data: [ ... ]`
-	re := regexp.MustCompile(`key:\s*'ds:1'.*?data:\s*(\[.*\])\s*,\s*sideChannel`)
-	match := re.FindStringSubmatch(htmlContent)
-	
-	if len(match) < 2 {
+	// Find the start of the data
+	// Look for key: 'ds:1' followed by data:
+	startRe := regexp.MustCompile(`key:\s*'ds:1'.*?data:`)
+	loc := startRe.FindStringIndex(htmlContent)
+	if loc == nil {
 		return nil, fmt.Errorf("could not find album data (ds:1) in page")
 	}
 
-	jsonStr := match[1]
+	startPos := loc[1]
+	// Scan forward for first '['
+	jsonStart := -1
+	for i := startPos; i < len(htmlContent); i++ {
+		if htmlContent[i] == '[' {
+			jsonStart = i
+			break
+		}
+	}
+	if jsonStart == -1 {
+		return nil, fmt.Errorf("could not find start of JSON array")
+	}
+
+	// Balance brackets to find the end of the JSON array
+	balance := 0
+	inString := false
+	escape := false
+	jsonEnd := -1
+
+	for i := jsonStart; i < len(htmlContent); i++ {
+		char := htmlContent[i]
+
+		if escape {
+			escape = false
+			continue
+		}
+
+		if char == '\\' {
+			escape = true
+			continue
+		}
+
+		if char == '"' {
+			inString = !inString
+			continue
+		}
+
+		if !inString {
+			if char == '[' {
+				balance++
+			} else if char == ']' {
+				balance--
+				if balance == 0 {
+					jsonEnd = i + 1
+					break
+				}
+			}
+		}
+	}
+
+	if jsonEnd == -1 {
+		return nil, fmt.Errorf("could not find end of JSON array")
+	}
+
+	jsonStr := htmlContent[jsonStart:jsonEnd]
 	
 	// Pre-cleanup of JSON string if needed (sometimes unescaping)
 	// Usually it's valid JSON directly in the script tag

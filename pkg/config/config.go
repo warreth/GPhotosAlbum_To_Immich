@@ -15,9 +15,11 @@ type GooglePhotosConfig struct {
 }
 
 type Config struct {
-	ApiKey       string               `json:"apiKey"`
-	ApiURL       string               `json:"apiURL"`
-	GooglePhotos []GooglePhotosConfig `json:"googlePhotos"`
+	ApiKey        string               `json:"apiKey"`
+	ApiURL        string               `json:"apiURL"`
+	Debug         bool                 `json:"debug"`         // Optional, enable verbose logging
+	SyncStartTime string               `json:"syncStartTime"` // Optional, e.g. "02:00" (24h format)
+	GooglePhotos  []GooglePhotosConfig `json:"googlePhotos"`
 }
 
 func ReadConfig(path string) (*Config, error) {

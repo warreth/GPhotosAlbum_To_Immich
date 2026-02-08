@@ -43,6 +43,8 @@ Alternatively, you can use a key with "All" permissions.
 {
     "apiKey": "YOUR_IMMICH_API_KEY",
     "apiURL": "http://your-immich-ip:2283/api",
+    "debug": false,
+    "syncStartTime": "02:00",
     "googlePhotos": [
         {
             "url": "https://photos.app.goo.gl/YourAlbumLink1",
@@ -52,6 +54,16 @@ Alternatively, you can use a key with "All" permissions.
     ]
 }
 ```
+
+### Options
+| Key | Type | Description |
+| --- | --- | --- |
+| `apiKey` | string | Immich API Key |
+| `apiURL` | string | Immich API URL (e.g. `http://localhost:2283/api`) |
+| `debug` | bool | Enable verbose logging (default: `false` for essential logs only) |
+| `syncStartTime` | string | (Optional) Daily start time in `HH:MM` format. If set, the app waits until this time to run the first sync. |
+| `googlePhotos` | array | List of albums to sync |
+| `googlePhotos[].syncInterval` | string | Interval between checks (e.g. `12h`, `60m`). Default `24h`. |
 
 ## Features
 - **Shared Albums**: Syncs photos directly from shared links.
