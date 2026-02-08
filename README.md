@@ -32,12 +32,12 @@ Sync photos from Google Photos Shared Albums to your Immich instance.
 
 ### API Permissions
 If you are generating a specific API key for this tool, ensure it has the following permissions:
-- `user.read`
 - `asset.read`
-- `asset.create`
-- `album.read`
+- `asset.upload`
 - `album.create`
+- `album.read`
 - `album.update`
+- `user.read`
 
 Alternatively, you can use a key with "All" permissions.
 
