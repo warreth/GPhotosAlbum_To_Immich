@@ -3,9 +3,6 @@ services:
     build: .
     container_name: immich-sync
     environment:
-      - IMMICH_API_URL=http://your-immich-instance/api
-      - IMMICH_API_KEY=your-api-key
-      # To set timezone
       - TZ=UTC
     volumes:
       - ./config.json:/app/config.json # Mount the config file (create it with your settings)

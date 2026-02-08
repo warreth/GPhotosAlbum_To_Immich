@@ -19,7 +19,11 @@ type App struct {
 }
 
 func New(cfg *config.Config) (*App, error) {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+		// Remove strict time parsing if needed, default is RFC3339
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	client := immich.NewClient(cfg.ApiURL, cfg.ApiKey)
 	return &App{
 		Cfg:    cfg,
@@ -68,6 +72,7 @@ func (a *App) syncLoop(ac config.GooglePhotosConfig) {
 
 	for {
 		<-ticker.C
+		a.Logger.Info("Starting scheduled sync check", "album", ac.URL)
 		a.runGPhotoSync(ac)
 	}
 }
@@ -138,9 +143,24 @@ func (a *App) runGPhotoSync(ac config.GooglePhotosConfig) {
 			continue
 		}
 
+		// Build Description
+		description := p.Description
+		if p.Uploader != "" {
+			if description != "" {
+				description += "\n\n"
+			}
+			description += fmt.Sprintf("Shared by: %s", p.Uploader)
+		}
+		
+		sep := "\n"
+		if description != "" {
+			sep = "\n\n"
+		}
+		description += fmt.Sprintf("%sSource Album: %s (%s)", sep, album.Title, ac.URL)
+
 		// Upload with metadata
         // Note: size is int64, which is correct for UploadAssetStream
-		uploadedId, err := a.Client.UploadAssetStream(r, fakeFilename, size, p.TakenAt)
+		uploadedId, isDup, err := a.Client.UploadAssetStream(r, fakeFilename, size, p.TakenAt, description)
 		r.Close() // Close response body
 		
 		if err != nil {
@@ -149,7 +169,11 @@ func (a *App) runGPhotoSync(ac config.GooglePhotosConfig) {
 		}
 
 		if uploadedId != "" {
-			logger.Info("Uploaded photo", "filename", fakeFilename, "id", uploadedId)
+			if isDup {
+				logger.Info("Photo already exists (deduplicated)", "filename", fakeFilename, "id", uploadedId)
+			} else {
+				logger.Info("Uploaded photo", "filename", fakeFilename, "id", uploadedId)
+			}
 			newAssetIds = append(newAssetIds, uploadedId)
 		}
 	}

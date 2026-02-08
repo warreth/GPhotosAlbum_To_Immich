@@ -4,22 +4,26 @@ Sync photos from Google Photos Shared Albums to your Immich instance.
 
 ## Quick Start (Docker)
 
-1. **Download**
-   ```bash
-   git clone https://github.com/webgears/immich-sync
-   cd immich-sync
+1. **Configure**
+   Download & Copy `config.example.json` to `config.json` and add your Immich details and Google Photos links.
+
+2. **Run**
+   The container is available on GitHub Container Registry (ghcr.io).
+   
+   Create a `compose.yml`:
+   ```yaml
+   services:
+     immich-sync:
+       image: ghcr.io/warreth/immich-sync:latest
+       container_name: immich-sync
+       restart: unless-stopped
+       volumes:
+         - ./config.json:/app/config.json
    ```
 
-2. **Configure**
-   Copy `config.example.json` to `config.json` and add your Immich details and Google Photos links.
+   Then run:
    ```bash
-   cp config.example.json config.json
-   nano config.json
-   ```
-
-3. **Run**
-   ```bash
-   docker-compose up -d
+   docker compose up -d
    ```
 
 ## Configuration (`config.json`)

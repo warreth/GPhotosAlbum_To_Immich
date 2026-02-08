@@ -3,10 +3,12 @@ package googlephotos
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,8 +23,9 @@ type Photo struct {
 	URL         string
 	Width       int
 	Height      int
-	TakenAt     time.Time // From metadata
+	TakenAt     time.Time
 	Description string
+	Uploader    string
 }
 
 // ScrapeAlbum parses a Google Photos shared album URL and returns the Album structure.
@@ -46,20 +49,28 @@ func ScrapeAlbum(url string) (*Album, error) {
 	if err != nil {
 		return nil, err
 	}
-	html := string(bodyBytes)
+	htmlContent := string(bodyBytes)
 
 	// Extract Title from OG:TITLE
 	title := "Google Photos Album"
 	titleRe := regexp.MustCompile(`<meta property="og:title" content="([^"]+)">`)
-	titleMatch := titleRe.FindStringSubmatch(html)
+	titleMatch := titleRe.FindStringSubmatch(htmlContent)
 	if len(titleMatch) > 1 {
 		title = titleMatch[1]
 	}
 
+	// Clean Title
+	title = html.UnescapeString(title)
+	// Remove Date Range Suffix (e.g. " · Feb 6–7") and emojis
+	dateSuffixRe := regexp.MustCompile(`\s*·.*$`)
+	title = dateSuffixRe.ReplaceAllString(title, "")
+	title = strings.TrimSpace(title)
+	title = strings.TrimSuffix(title, " 📸")
+
 	// Regex to extract the data array passed to AF_initDataCallback for 'ds:1' (photos)
 	// We matched `key: 'ds:1' ... data: [ ... ]`
 	re := regexp.MustCompile(`key:\s*'ds:1'.*?data:\s*(\[.*\])\s*,\s*sideChannel`)
-	match := re.FindStringSubmatch(html)
+	match := re.FindStringSubmatch(htmlContent)
 	
 	if len(match) < 2 {
 		return nil, fmt.Errorf("could not find album data (ds:1) in page")
@@ -142,18 +153,21 @@ func ScrapeAlbum(url string) (*Album, error) {
 		
 		// Description/Caption
 		// Usually at a later index, e.g., index 5 or inside another object.
-		// For robustness, skip complex scraping unless requested specifically.
-		// User asked for "all available metadata".
-		// Index 5 often contains description/comment if string?
-		// We'll leave it as enhancement or strict checking.
+		var description string
+		if len(itemArr) > 5 {
+			if d, ok := itemArr[5].(string); ok {
+				description = d
+			}
+		}
 
 		if url != "" {
 			photos = append(photos, Photo{
-				ID:      id,
-				URL:     url,
-				Width:   w,
-				Height:  h,
-				TakenAt: timestamp,
+				ID:          id,
+				URL:         url,
+				Width:       w,
+				Height:      h,
+				TakenAt:     timestamp,
+				Description: description,
 			})
 		}
 	}

@@ -7,8 +7,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -119,10 +117,22 @@ func (c *Client) CreateAlbum(name string) (*Album, error) {
 }
 
 func (c *Client) AddAssetsToAlbum(albumId string, assetIds []string) error {
-	payload := map[string]interface{}{"ids": assetIds}
-	jsonPayload, _ := json.Marshal(payload)
-	_, err := c.request("PUT", fmt.Sprintf("albums/%s/assets", albumId), jsonPayload, "")
-	return err
+	const batchSize = 50 // process in chunks
+	for i := 0; i < len(assetIds); i += batchSize {
+		end := i + batchSize
+		if end > len(assetIds) {
+			end = len(assetIds)
+		}
+		
+		chunk := assetIds[i:end]
+		payload := map[string]interface{}{"ids": chunk}
+		jsonPayload, _ := json.Marshal(payload)
+		_, err := c.request("PUT", fmt.Sprintf("albums/%s/assets", albumId), jsonPayload, "")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Client) SearchAssets(filename string) ([]ImmichAsset, error) {
@@ -138,65 +148,6 @@ func (c *Client) SearchAssets(filename string) ([]ImmichAsset, error) {
 	return resp.Assets.Items, err
 }
 
-// UploadAsset uploads a file to Immich.
-// If createdAt is provided (not null/zero), it overrides the file's stats.
-func (c *Client) UploadAsset(filePath string, createdAt time.Time) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	
-	stat, _ := file.Stat()
-	
-	// deviceAssetId and deviceId are required by Immich
-	_ = writer.WriteField("deviceAssetId", fmt.Sprintf("%s-%d", filepath.Base(filePath), stat.Size()))
-	_ = writer.WriteField("deviceId", "immich-sync-go")
-	
-	creationTime := stat.ModTime()
-	if !createdAt.IsZero() {
-		creationTime = createdAt
-	}
-	
-	_ = writer.WriteField("fileCreatedAt", creationTime.Format(time.RFC3339))
-    _ = writer.WriteField("fileModifiedAt", creationTime.Format(time.RFC3339))
-    _ = writer.WriteField("isFavorite", "false")
-
-	part, err := writer.CreateFormFile("assetData", filepath.Base(filePath))
-	if err != nil {
-		return "", err
-	}
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return "", err
-	}
-	err = writer.Close()
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := c.request("POST", "assets", body.Bytes(), writer.FormDataContentType())
-	if err != nil {
-		return "", err
-	}
-	
-	var res map[string]interface{}
-	json.Unmarshal(resp, &res)
-	if id, ok := res["id"].(string); ok {
-		return id, nil
-	}
-    // Check if duplicate is reported in response body sometimes
-    // Immich usually returns 201 Created even if dup, with `duplicate: true` in response.
-    // Check parsing
-    if dup, ok := res["duplicate"].(bool); ok && dup {
-         return res["id"].(string), nil
-    }
-    
-	return "", nil 
-}
 
 func (c *Client) requestWithReader(method string, path string, bodyReader io.Reader, contentType string) ([]byte, error) {
 	url := fmt.Sprintf("%s/%s", c.APIURL, path)
@@ -232,7 +183,7 @@ func (c *Client) requestWithReader(method string, path string, bodyReader io.Rea
 	return body, nil
 }
 
-func (c *Client) UploadAssetStream(reader io.Reader, filename string, size int64, createdAt time.Time) (string, error) {
+func (c *Client) UploadAssetStream(reader io.Reader, filename string, size int64, createdAt time.Time, description string) (string, bool, error) {
 	pr, pw := io.Pipe()
 	multipartWriter := multipart.NewWriter(pw)
 
@@ -252,6 +203,9 @@ func (c *Client) UploadAssetStream(reader io.Reader, filename string, size int64
 		_ = multipartWriter.WriteField("fileCreatedAt", creationTime.Format(time.RFC3339))
 		_ = multipartWriter.WriteField("fileModifiedAt", creationTime.Format(time.RFC3339))
 		_ = multipartWriter.WriteField("isFavorite", "false")
+		if description != "" {
+			_ = multipartWriter.WriteField("description", description)
+		}
 
 		part, err := multipartWriter.CreateFormFile("assetData", filename)
 		if err != nil {
@@ -264,18 +218,25 @@ func (c *Client) UploadAssetStream(reader io.Reader, filename string, size int64
 
 	resp, err := c.requestWithReader("POST", "assets", pr, multipartWriter.FormDataContentType())
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	
 	var res map[string]interface{}
 	json.Unmarshal(resp, &res)
-	if id, ok := res["id"].(string); ok {
-		return id, nil
+
+	isDup := false
+	if d, ok := res["duplicate"].(bool); ok && d {
+		isDup = true
 	}
-    if dup, ok := res["duplicate"].(bool); ok && dup {
-         return res["id"].(string), nil
-    }
-	return "", nil 
+
+	if id, ok := res["id"].(string); ok {
+		return id, isDup, nil
+	}
+    
+    // Sometimes duplicate comes without id in main body if errored? 
+    // Usually immich returns 200/201 with id.
+    
+	return "", false, nil 
 }
 
 func (c *Client) GetUser() (string, string, error) {
