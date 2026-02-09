@@ -1,4 +1,4 @@
-# Immich Sync
+# GPhotos_To_Immich
 
 Sync photos from Google Photos Shared Albums to your Immich instance.
 
