@@ -14,7 +14,7 @@ Sync photos from Google Photos Shared Albums to your Immich instance.
    ```yaml
    services:
      immich-sync:
-       image: ghcr.io/warreth/immich-sync:latest
+       image: ghcr.io/warreth/gphotosalbum_to_immich:latest
        container_name: immich-sync
        restart: unless-stopped
        volumes:
