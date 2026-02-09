@@ -37,6 +37,7 @@ If you are generating a specific API key for this tool, ensure it has the follow
 - `album.create`
 - `album.read`
 - `album.update`
+- `albumAsset.create`
 - `user.read`
 
 Alternatively, you can use a key with "All" permissions.
