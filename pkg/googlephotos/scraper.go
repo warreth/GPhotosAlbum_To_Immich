@@ -26,8 +26,6 @@ type Photo struct {
 	Height      int
 	TakenAt     time.Time
 	Description string
-	Uploader    string
-	IsVideo     bool
 }
 
 // ScrapeAlbum parses a Google Photos shared album URL and returns the Album structure.

@@ -2,6 +2,7 @@ package progress
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -9,10 +10,12 @@ import (
 )
 
 const (
-	barWidth       = 30
-	updateInterval = 3 * time.Second
-	filledBlock    = "█"
-	emptyBlock     = "░"
+	barWidth             = 30
+	ttyUpdateInterval    = 3 * time.Second
+	nonTTYUpdateInterval = 30 * time.Second
+	nonTTYPercentStep    = 10 // only print at every 10% milestone in Docker/non-TTY
+	filledBlock          = "█"
+	emptyBlock           = "░"
 )
 
 // Tracker tracks download/upload progress for an album
@@ -27,18 +30,31 @@ type Tracker struct {
 	bytesUploaded   atomic.Int64
 	startTime       time.Time
 	debug           bool
+	isTTY           bool
+	lastLogPercent  int // last milestone printed in non-TTY mode
 	done            chan struct{}
 	once            sync.Once
+}
+
+// detectTTY checks if stdout is a terminal (false in Docker logs)
+func detectTTY() bool {
+	stat, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) != 0
 }
 
 // New creates a new progress tracker for an album
 func New(albumName string, totalItems int, debug bool) *Tracker {
 	return &Tracker{
-		albumName:  albumName,
-		totalItems: totalItems,
-		startTime:  time.Now(),
-		debug:      debug,
-		done:       make(chan struct{}),
+		albumName:      albumName,
+		totalItems:     totalItems,
+		startTime:      time.Now(),
+		debug:          debug,
+		isTTY:          detectTTY(),
+		lastLogPercent: -1,
+		done:           make(chan struct{}),
 	}
 }
 
@@ -64,7 +80,11 @@ func (t *Tracker) Start() {
 		return
 	}
 	go func() {
-		ticker := time.NewTicker(updateInterval)
+		interval := ttyUpdateInterval
+		if !t.isTTY {
+			interval = nonTTYUpdateInterval
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -87,7 +107,7 @@ func (t *Tracker) Stop() {
 	})
 }
 
-// printProgress prints a formatted progress line for Docker-friendly logs
+// printProgress prints a formatted progress line, rate-limited for Docker logs
 func (t *Tracker) printProgress() {
 	processed := int(t.processedItems.Load())
 	total := t.totalItems
@@ -95,14 +115,23 @@ func (t *Tracker) printProgress() {
 		return
 	}
 
-	elapsed := time.Since(t.startTime)
-	percent := float64(processed) / float64(total) * 100
+	percent := int(float64(processed) / float64(total) * 100)
 
+	// In non-TTY mode (Docker), only print at percentage milestones to avoid log spam
+	if !t.isTTY {
+		milestone := (percent / nonTTYPercentStep) * nonTTYPercentStep
+		if milestone <= t.lastLogPercent {
+			return
+		}
+		t.lastLogPercent = milestone
+	}
+
+	elapsed := time.Since(t.startTime)
 	bar := renderBar(processed, total)
 	speed := t.formatSpeeds(elapsed)
 	eta := t.formatETA(processed, total, elapsed)
 
-	fmt.Printf("[%s] %s %3.0f%% │ %d/%d │ %s │ ETA: %s\n",
+	fmt.Printf("[%s] %s %3d%% │ %d/%d │ %s │ ETA: %s\n",
 		truncateAlbumName(t.albumName, 20),
 		bar,
 		percent,

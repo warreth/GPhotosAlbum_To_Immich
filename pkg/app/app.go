@@ -325,12 +325,6 @@ func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string, exi
 
 	// Build description with source metadata
 	description := p.Description
-	if p.Uploader != "" {
-		if description != "" {
-			description += "\n\n"
-		}
-		description += fmt.Sprintf("Shared by: %s", p.Uploader)
-	}
 	sep := "\n"
 	if description != "" {
 		sep = "\n\n"

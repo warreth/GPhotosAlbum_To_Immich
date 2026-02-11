@@ -95,7 +95,7 @@ func (c *Client) CreateAlbum(name string) (*Album, error) {
 }
 
 func (c *Client) AddAssetsToAlbum(albumId string, assetIds []string) error {
-	const batchSize = 50 // process in chunks
+	const batchSize = 100 // process in chunks
 	for i := 0; i < len(assetIds); i += batchSize {
 		end := i + batchSize
 		if end > len(assetIds) {
