@@ -1,17 +1,17 @@
-# GPhotos_To_Immich
+# GPhotos To Immich
 
-Sync photos from Google Photos Shared Albums to your Immich instance.
+Sync photos from Google Photos shared albums to your [Immich](https://immich.app) instance- automatically, on a schedule.
 
-## Quick Start (Docker)
+---
 
-1. **Configure**
-   Download & Copy `config.example.json` to `config.json` and add your Immich details and Google Photos links.
+## Quick Start
 
-2. **Run**
-   The container is available on GitHub Container Registry (ghcr.io).
-   
-   Create a `compose.yml`:
+1. Copy `config.example.json` to `config.json` and fill in your Immich API details and Google Photos shared album links.
+
+2. Run with Docker Compose:
+
    ```yaml
+   # compose.yml
    services:
      immich-sync:
        image: ghcr.io/warreth/gphotosalbum_to_immich:latest
@@ -20,81 +20,94 @@ Sync photos from Google Photos Shared Albums to your Immich instance.
        volumes:
          - ./config.json:/app/config.json
    ```
-   
-   > **Note:** You can also configure using environment variables (e.g. `IMMICH_API_KEY`) if you prefer not to mount a config file.
 
-   Then run:
    ```bash
    docker compose up -d
    ```
 
-## Configuration (`config.json`)
+> You can also configure via environment variables (`IMMICH_API_KEY`, `IMMICH_API_URL`) instead of mounting a config file.
+
+---
+
+## Configuration
 
 ### API Permissions
-If you are generating a specific API key for this tool, ensure it has the following permissions:
-- `asset.read`
-- `asset.upload`
-- `album.create`
-- `album.read`
-- `album.update`
-- `albumAsset.create`
-- `user.read`
 
-Alternatively, you can use a key with "All" permissions.
+Your Immich API key needs these permissions (or use "All"):
+
+`asset.read` · `asset.upload` · `album.create` · `album.read` · `album.update` · `albumAsset.create` · `user.read`
+
+### Example `config.json`
 
 ```json
 {
-    "apiKey": "YOUR_IMMICH_API_KEY",
-    "apiURL": "http://your-immich-ip:2283/api",
-    "debug": false,
-    "workers": 4,
-    "strictMetadata": false,
-    "skipVideos": false,
-    "syncStartTime": "02:00",
-    "googlePhotos": [
-        {
-            "url": "https://photos.app.goo.gl/YourAlbumLink1",
-            "syncInterval": "12h",
-            "albumName": "Vacation 2023"
-        }
-    ]
+  "apiKey": "YOUR_IMMICH_API_KEY",
+  "apiURL": "http://your-immich-ip:2283/api",
+  "debug": false,
+  "workers": 4,
+  "albumWorkers": 3,
+  "strictMetadata": false,
+  "skipVideos": false,
+  "googlePhotos": [
+    {
+      "url": "https://photos.app.goo.gl/YourAlbumLink1",
+      "albumName": "Vacation 2023",
+      "syncInterval": "12h"
+    },
+    {
+      "url": "https://photos.app.goo.gl/ExistingAlbumLink",
+      "immichAlbumId": "existing-album-uuid",
+      "syncInterval": "1h",
+      "immichAlbumId": "existing-immich-album-id"
+    }
+  ]
 }
 ```
 
 ### Options
-| Key | Type | Description |
-| --- | --- | --- |
-| `apiKey` | string | Immich API Key |
-| `apiURL` | string | Immich API URL (e.g. `http://localhost:2283/api`) |
-| `workers` | int | (Optional) Number of concurrent download/upload workers per album (default: `1`). |
-| `debug` | bool | Enable verbose logging (default: `false` for essential logs only) |
-| `strictMetadata` | bool | (Optional) Skip items with missing/invalid dates instead of uploading with current date (default: `false`). Logs skipped item URLs for manual review. |
-| `skipVideos` | bool | (Optional) Skip all video items entirely (default: `false`). Useful if you only want photos. |
-| `syncStartTime` | string | (Optional) Daily start time in `HH:MM` format. If set, the app waits until this time to run the first sync. |
-| `googlePhotos[].syncInterval` | string | Interval between checks (e.g. `12h`, `60m`). Default `24h`. |
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `apiKey` | string | — | Immich API key (required). |
+| `apiURL` | string | — | Immich API URL, e.g. `http://localhost:2283/api` (required). |
+| `debug` | bool | `false` | Enable verbose debug logging. When disabled, displays clean progress bars with speed and ETA. |
+| `workers` | int | `1` | Number of concurrent download/upload workers **per album**. Controls how many photos within a single album are downloaded and uploaded in parallel. Higher values speed up large albums but use more bandwidth and memory. |
+| `albumWorkers` | int | `1` | Number of albums processed **concurrently**. Controls how many albums are synced at the same time. Useful when you have many albums configured and want to process several in parallel. |
+| `strictMetadata` | bool | `false` | Skip items with missing/invalid dates instead of uploading with current date. Skipped URLs are logged for manual review. |
+| `skipVideos` | bool | `false` | Skip all video items entirely. Useful if you only want photos. |
+
+### Album Options
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `googlePhotos[].url` | string | — | Google Photos shared album link (required). |
+| `googlePhotos[].albumName` | string | auto-detected | Override the album name in Immich. If omitted, uses the album title from Google Photos. |
+| `googlePhotos[].syncInterval` | string | `24h` | How often to re-check this album (e.g. `12h`, `60m`, `1h30m`). |
+| `googlePhotos[].immichAlbumId` | string | — | Link to an existing Immich album by UUID instead of creating a new one. |
+
+---
 
 ## Features
-- **Shared Albums**: Syncs photos directly from shared links.
-- **Video Support**: Automatically detects and downloads videos (not just thumbnails). Can be disabled with `skipVideos`.
-- **Efficient Processing**: Streaming uploads with minimal resource usage.
-- **Concurrent Workers**: Support for parallel downloading/uploading to speed up large albums.
-- **Sequential Syncing**: Processes configured albums one by one to manage load.
-- **Smart Date Detection**: Improved metadata parsing to find the original "taken" date instead of upload date.
-- **Strict Metadata Mode**: Option to skip items with missing dates instead of defaulting to current date.
-- **Rate Limit Protection**: Built-in jitter and intelligent retry logic to avoid Google Photos rate limits.
-- **Background Sync**: Runs continuously on a schedule.
-- **Respects Trash**: Items previously moved to trash in Immich are detected and skipped, not re-uploaded.
 
-> **Note:** Motion/Live photos are imported as plain still images. The embedded video component is stripped so Immich treats them as normal photos without errors.
+- **No Google API key required.** Scrapes directly from shared album links.
+- **Video support.** Downloads full videos, not just thumbnails. Disable with `skipVideos`.
+- **Concurrent workers.** Parallel download/upload per album (`workers`) and parallel album processing (`albumWorkers`).
+- **Live progress.** Progress bars with transfer speed and ETA; verbose structured logs in debug mode.
+- **Smart date detection.** Extracts the original "taken" date from metadata.
+- **Strict metadata mode.** Optionally skip items with missing dates instead of falling back to the current date.
+- **Rate limit protection.** Jitter and exponential backoff to avoid Google Photos throttling.
+- **Duplicate detection.** Pre-fetches existing album assets for O(1) dedup. Respects Immich trash.
 
-## Manual Run (Dev)
+> **Note:** Motion/Live photos are imported as still images. The embedded video component is stripped so Immich handles them without errors.
+
+---
+
+## Development
 
 ```bash
+# Run directly
 go run main.go
-```
 
-or using docker
-
-```bash
+# Run with Docker (build from source)
 sudo docker compose up --build --remove-orphans
 ```

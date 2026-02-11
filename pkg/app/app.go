@@ -11,6 +11,7 @@ import (
 	"warreth.dev/immich-sync/pkg/config"
 	"warreth.dev/immich-sync/pkg/googlephotos"
 	"warreth.dev/immich-sync/pkg/immich"
+	"warreth.dev/immich-sync/pkg/progress"
 )
 
 type App struct {
@@ -62,24 +63,6 @@ func (a *App) Run() {
 	if len(a.Cfg.GooglePhotos) == 0 {
 		a.Logger.Warn("No albums configured")
 		return
-	}
-
-	// Schedule Start Time if configured
-	if a.Cfg.SyncStartTime != "" {
-		now := time.Now()
-		parsedTime, err := time.Parse("15:04", a.Cfg.SyncStartTime)
-		if err != nil {
-			a.Logger.Error("Invalid syncStartTime format, expected HH:MM", "error", err)
-		} else {
-			// Construct the next occurrence
-			nextRun := time.Date(now.Year(), now.Month(), now.Day(), parsedTime.Hour(), parsedTime.Minute(), 0, 0, now.Location())
-			if nextRun.Before(now) {
-				nextRun = nextRun.Add(24 * time.Hour)
-			}
-			delay := nextRun.Sub(now)
-			a.Logger.Info("Waiting for scheduled start time", "start_time", a.Cfg.SyncStartTime, "delay", delay.Round(time.Second).String())
-			time.Sleep(delay)
-		}
 	}
 
 	// Initialize schedule
@@ -141,9 +124,11 @@ func (a *App) Run() {
 }
 
 type processResult struct {
-	ID          string
-	WasUploaded bool
-	Error       error
+	ID              string
+	WasUploaded     bool
+	Error           error
+	BytesDownloaded int64
+	BytesUploaded   int64
 }
 
 func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Album) {
@@ -223,6 +208,10 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Alb
 
 	logger.Info("Processing items", "total_items", total, "workers", numWorkers)
 
+	// Create and start progress tracker
+	tracker := progress.New(albumTitle, total, a.Cfg.Debug)
+	tracker.Start()
+
 	jobs := make(chan googlephotos.Photo, numWorkers*2)
 	results := make(chan processResult, numWorkers*2)
 	var wg sync.WaitGroup
@@ -232,13 +221,13 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Alb
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				id, uploaded, err := a.processItem(p, albumTitle, ac.URL, existingFiles)
-				results <- processResult{ID: id, WasUploaded: uploaded, Error: err}
+				id, uploaded, bytesDown, bytesUp, err := a.processItem(p, albumTitle, ac.URL, existingFiles)
+				results <- processResult{ID: id, WasUploaded: uploaded, Error: err, BytesDownloaded: bytesDown, BytesUploaded: bytesUp}
 			}
 		}()
 	}
 
-	// Feed jobs in a goroutine to avoid blocking with small channel buffer
+	// Feed jobs
 	go func() {
 		for _, p := range album.Photos {
 			jobs <- p
@@ -255,24 +244,38 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Alb
 	// Stream results as they arrive
 	for res := range results {
 		processed++
+		wasFailed := false
+		wasSkipped := false
+		wasAdded := false
+
 		if res.Error != nil {
 			logger.Error("Failed to process item", "error", res.Error)
 			failed++
+			wasFailed = true
 		} else {
 			if res.WasUploaded {
 				added++
+				wasAdded = true
 			} else if res.ID == "" {
 				skipped++
+				wasSkipped = true
 			}
 			if res.ID != "" {
 				newAssetIds = append(newAssetIds, res.ID)
 			}
 		}
-		// Log progress every 100 items for large albums
-		if processed%100 == 0 {
-			logger.Info("Progress", "processed", processed, "total", total, "added", added, "skipped", skipped, "failed", failed)
+
+		// Update progress tracker
+		tracker.RecordItem(res.BytesDownloaded, res.BytesUploaded, wasAdded, wasSkipped, wasFailed)
+
+		// Log progress every 100 items in debug mode
+		if a.Cfg.Debug && processed%100 == 0 {
+			logger.Debug("Progress", "processed", processed, "total", total, "added", added, "skipped", skipped, "failed", failed)
 		}
 	}
+
+	// Stop tracker and print final summary
+	tracker.Stop()
 
 	if albumId != "" && len(newAssetIds) > 0 {
 		logger.Info("Adding items to album", "count", len(newAssetIds), "album", albumTitle)
@@ -281,37 +284,41 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Alb
 			logger.Error("Error adding assets to album", "error", err)
 		}
 	}
-	logger.Info("Sync finished", "added", added, "skipped", skipped, "failed", failed, "total", processed)
+	if a.Cfg.Debug {
+		logger.Info("Sync finished", "added", added, "skipped", skipped, "failed", failed, "total", processed)
+	}
 }
 
-func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string, existingFiles map[string]string) (string, bool, error) {
+func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string, existingFiles map[string]string) (string, bool, int64, int64, error) {
 	safeId := strings.ReplaceAll(p.ID, "/", "_")
 	safeId = strings.ReplaceAll(safeId, ":", "_")
 	baseName := fmt.Sprintf("gp_%s", safeId)
 
-	// O(1) check against pre-fetched album assets (replaces 6 API calls per photo)
+	// O(1) check against pre-fetched album assets
 	if assetId, exists := existingFiles[baseName]; exists {
 		a.Logger.Debug("Asset already in album", "id", assetId, "filename", baseName)
-		return "", false, nil
+		return "", false, 0, 0, nil
 	}
 
 	if a.Cfg.StrictMetadata && p.TakenAt.IsZero() {
 		a.Logger.Warn("Skipping item with missing metadata date",
 			"id", p.ID, "url", p.URL)
-		return "", false, nil
+		return "", false, 0, 0, nil
 	}
 
-	// Download original media from Google Photos (=d for original quality)
+	// Download original media from Google Photos
 	a.Logger.Debug("Downloading item", "id", safeId)
 	r, size, ext, isVideo, err := googlephotos.DownloadMedia(a.GPClient, p.URL)
 	if err != nil {
-		return "", false, fmt.Errorf("error downloading item: %w", err)
+		return "", false, 0, 0, fmt.Errorf("error downloading item: %w", err)
 	}
+
+	bytesDownloaded := size
 
 	if isVideo && a.Cfg.SkipVideos {
 		r.Close()
 		a.Logger.Debug("Skipping video item", "id", p.ID)
-		return "", false, nil
+		return "", false, bytesDownloaded, 0, nil
 	}
 
 	filename := baseName + ext
@@ -338,18 +345,20 @@ func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string, exi
 	uploadedId, isDup, err := a.Client.UploadAssetStream(r, filename, size, p.TakenAt, description)
 	r.Close()
 	if err != nil {
-		return "", false, fmt.Errorf("error uploading %s: %w", filename, err)
+		return "", false, bytesDownloaded, 0, fmt.Errorf("error uploading %s: %w", filename, err)
 	}
 	if uploadedId == "" {
-		return "", false, fmt.Errorf("upload returned empty ID for %s", filename)
+		return "", false, bytesDownloaded, 0, fmt.Errorf("upload returned empty ID for %s", filename)
 	}
+
+	bytesUploaded := size
 
 	if isDup {
 		a.Logger.Debug("Asset deduplicated by Immich", "filename", filename, "id", uploadedId)
-		return uploadedId, false, nil
+		return uploadedId, false, bytesDownloaded, bytesUploaded, nil
 	}
 
 	a.Logger.Debug("Uploaded item", "filename", filename, "id", uploadedId)
-	return uploadedId, true, nil
+	return uploadedId, true, bytesDownloaded, bytesUploaded, nil
 }
 

@@ -1,6 +1,7 @@
 {
   "apiKey": "your-immich-api-key",
   "apiURL": "http://192.168.1.100:2283/api",
+  "debug": false,
   "workers": 4,
   "albumWorkers": 3,
   "strictMetadata": false,
