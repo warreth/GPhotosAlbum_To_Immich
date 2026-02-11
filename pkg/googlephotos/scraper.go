@@ -207,13 +207,13 @@ func ScrapeAlbum(client *Client, albumURL string) (*Album, error) {
 		}
 
 		if mediaKey != "" {
-			fmt.Printf("  Album has continuation token, fetching remaining items (have %d so far)...\n", len(photos))
+			client.logger.Info("Album has continuation token, fetching remaining items", "count", len(photos))
 			const maxPages = 500
 			for page := 0; page < maxPages && continueToken != ""; page++ {
-				fmt.Printf("  Fetching page %d (total items so far: %d)...\n", page+2, len(photos))
+				client.logger.Debug("Fetching album page", "page", page+2, "total_items", len(photos))
 				nextPhotos, nextToken, fetchErr := fetchNextPage(client, mediaKey, authKey, continueToken, sourcePath, wiz)
 				if fetchErr != nil {
-					fmt.Printf("  Warning: pagination stopped at page %d: %v\n", page+2, fetchErr)
+					client.logger.Warn("Pagination stopped", "page", page+2, "error", fetchErr)
 					break
 				}
 				if len(nextPhotos) == 0 {
@@ -223,7 +223,7 @@ func ScrapeAlbum(client *Client, albumURL string) (*Album, error) {
 				continueToken = nextToken
 			}
 		} else {
-			fmt.Printf("  Warning: could not determine album mediaKey, pagination skipped\n")
+			client.logger.Warn("Could not determine album mediaKey, pagination skipped")
 		}
 	}
 

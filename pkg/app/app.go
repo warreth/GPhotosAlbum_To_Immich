@@ -40,7 +40,7 @@ func New(cfg *config.Config) (*App, error) {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	client := immich.NewClient(cfg.ApiURL, cfg.ApiKey)
-	gpClient := googlephotos.NewClient()
+	gpClient := googlephotos.NewClient(logger)
 	return &App{
 		Cfg:      cfg,
 		Client:   client,
@@ -88,13 +88,45 @@ func (a *App) Run() {
 		nextRun[ac.URL] = time.Now()
 	}
 
+	albumWorkers := a.Cfg.AlbumWorkers
+	if albumWorkers < 1 {
+		albumWorkers = 1
+	}
+
 	for {
-		// Sequential Sync Loop
+		// Collect albums due for sync
+		var due []config.GooglePhotosConfig
 		for _, ac := range a.Cfg.GooglePhotos {
 			if time.Now().After(nextRun[ac.URL]) {
-				a.processAlbum(ac)
-				
-				// Schedule next run
+				due = append(due, ac)
+			}
+		}
+
+		if len(due) > 0 {
+			// Fetch album list from Immich once per sync cycle
+			albumCache, err := a.Client.GetAlbums()
+			if err != nil {
+				a.Logger.Warn("Failed to fetch Immich album list", "error", err)
+			}
+
+			a.Logger.Info("Processing due albums", "count", len(due), "album_workers", albumWorkers)
+
+			// Process due albums concurrently with bounded concurrency
+			sem := make(chan struct{}, albumWorkers)
+			var wg sync.WaitGroup
+			for _, ac := range due {
+				wg.Add(1)
+				go func(ac config.GooglePhotosConfig) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					a.processAlbum(ac, albumCache)
+				}(ac)
+			}
+			wg.Wait()
+
+			// Schedule next runs
+			for _, ac := range due {
 				interval, err := time.ParseDuration(ac.SyncInterval)
 				if err != nil || interval == 0 {
 					interval = 24 * time.Hour
@@ -104,7 +136,6 @@ func (a *App) Run() {
 			}
 		}
 
-		// Wait before checking again
 		time.Sleep(1 * time.Minute)
 	}
 }
@@ -115,7 +146,7 @@ type processResult struct {
 	Error       error
 }
 
-func (a *App) processAlbum(ac config.GooglePhotosConfig) {
+func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Album) {
 	logger := a.Logger.With("album_url", ac.URL)
 	logger.Info("Syncing Google Photos Album")
 
@@ -141,13 +172,10 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 	if ac.ImmichAlbumID != "" {
 		albumId = ac.ImmichAlbumID
 	} else {
-		albums, err := a.Client.GetAlbums()
-		if err == nil {
-			for _, a := range albums {
-				if a.AlbumName == albumTitle {
-					albumId = a.Id
-					break
-				}
+		for _, a := range albumCache {
+			if a.AlbumName == albumTitle {
+				albumId = a.Id
+				break
 			}
 		}
 		if albumId == "" {
@@ -195,8 +223,8 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 
 	logger.Info("Processing items", "total_items", total, "workers", numWorkers)
 
-	jobs := make(chan googlephotos.Photo, total)
-	results := make(chan processResult, total)
+	jobs := make(chan googlephotos.Photo, numWorkers*2)
+	results := make(chan processResult, numWorkers*2)
 	var wg sync.WaitGroup
 
 	for w := 0; w < numWorkers; w++ {
@@ -210,18 +238,25 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 		}()
 	}
 
-	for _, p := range album.Photos {
-		jobs <- p
-	}
-	close(jobs)
+	// Feed jobs in a goroutine to avoid blocking with small channel buffer
+	go func() {
+		for _, p := range album.Photos {
+			jobs <- p
+		}
+		close(jobs)
+	}()
 
-	wg.Wait()
-	close(results)
+	// Close results after all workers finish
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
+	// Stream results as they arrive
 	for res := range results {
 		processed++
 		if res.Error != nil {
-			a.Logger.Error("Failed to process item", "error", res.Error)
+			logger.Error("Failed to process item", "error", res.Error)
 			failed++
 		} else {
 			if res.WasUploaded {
@@ -233,16 +268,20 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 				newAssetIds = append(newAssetIds, res.ID)
 			}
 		}
+		// Log progress every 100 items for large albums
+		if processed%100 == 0 {
+			logger.Info("Progress", "processed", processed, "total", total, "added", added, "skipped", skipped, "failed", failed)
+		}
 	}
 
 	if albumId != "" && len(newAssetIds) > 0 {
-		a.Logger.Info("Adding items to album", "count", len(newAssetIds), "album", albumTitle)
+		logger.Info("Adding items to album", "count", len(newAssetIds), "album", albumTitle)
 		err := a.Client.AddAssetsToAlbum(albumId, newAssetIds)
 		if err != nil {
-			a.Logger.Error("Error adding assets to album", "error", err)
+			logger.Error("Error adding assets to album", "error", err)
 		}
 	}
-	a.Logger.Info("Sync finished", "title", albumTitle, "added", added, "skipped", skipped, "failed", failed, "total", processed)
+	logger.Info("Sync finished", "added", added, "skipped", skipped, "failed", failed, "total", processed)
 }
 
 func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string, existingFiles map[string]string) (string, bool, error) {

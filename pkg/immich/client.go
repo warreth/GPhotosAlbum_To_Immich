@@ -11,23 +11,6 @@ import (
 	"time"
 )
 
-type ImmichAsset struct {
-	Id               string `json:"id"`
-	Type             string `json:"type"`
-	OriginalFileName string `json:"originalFileName"`
-	OriginalMimeType string `json:"originalMimeType"`
-	FileCreatedAt    string `json:"fileCreatedAt"`
-	IsTrashed        bool   `json:"isTrashed"`
-}
-
-type ImmichAssetResponse struct {
-	Assets struct {
-		Total int           `json:"total"`
-		Count int           `json:"count"`
-		Items []ImmichAsset `json:"items"`
-	} `json:"assets"`
-}
-
 type Album struct {
 	AlbumName string `json:"albumName"`
 	Id        string `json:"id"`
@@ -46,53 +29,30 @@ type Client struct {
 }
 
 func NewClient(apiURL, apiKey string) *Client {
-	// Ensure APIURL doesn't end with slash but allowing it to be handled in getData mainly
 	if strings.HasSuffix(apiURL, "/") {
 		apiURL = apiURL[:len(apiURL)-1]
 	}
 	return &Client{
 		APIURL: apiURL,
 		APIKey: apiKey,
-		Client: &http.Client{},
+		Client: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20,
+				IdleConnTimeout:     90 * time.Second,
+			},
+			Timeout: 120 * time.Second,
+		},
 	}
 }
 
+// request is a convenience wrapper for JSON API calls
 func (c *Client) request(method string, path string, payload []byte, contentType string) ([]byte, error) {
-	url := fmt.Sprintf("%s/%s", c.APIURL, path)
 	var bodyReader io.Reader
 	if payload != nil {
 		bodyReader = bytes.NewReader(payload)
 	}
-
-	req, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Accept", "application/json")
-	if contentType != "" {
-		req.Header.Add("Content-Type", contentType)
-	} else {
-		req.Header.Add("Content-Type", "application/json")
-	}
-	req.Header.Add("x-api-key", c.APIKey)
-
-	res, err := c.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if res.StatusCode >= 400 {
-		return body, fmt.Errorf("API error: %s - %s", res.Status, string(body))
-	}
-
-	return body, nil
+	return c.requestWithReader(method, path, bodyReader, contentType)
 }
 
 func (c *Client) GetAlbums() ([]Album, error) {
@@ -151,19 +111,6 @@ func (c *Client) AddAssetsToAlbum(albumId string, assetIds []string) error {
 		}
 	}
 	return nil
-}
-
-func (c *Client) SearchAssets(filename string) ([]ImmichAsset, error) {
-	// Simple search by filename
-	payload := map[string]interface{}{"originalFileName": filename}
-	jsonPayload, _ := json.Marshal(payload)
-	body, err := c.request("POST", "search/metadata", jsonPayload, "")
-	if err != nil {
-		return nil, err
-	}
-	var resp ImmichAssetResponse
-	err = json.Unmarshal(body, &resp)
-	return resp.Assets.Items, err
 }
 
 
@@ -250,10 +197,8 @@ func (c *Client) UploadAssetStream(reader io.Reader, filename string, size int64
 	if id, ok := res["id"].(string); ok {
 		return id, isDup, nil
 	}
-    
-    // Check for error/message in body if ID is missing but status was 2xx
-	// Sometimes duplicate comes without id in main body if errored? 
-    // Usually immich returns 200/201 with id.
+
+	// Check for error/message in body if ID is missing
 	if msg, ok := res["message"].(string); ok {
 		return "", false, fmt.Errorf("upload failed with message: %s", msg)
 	}
@@ -261,19 +206,15 @@ func (c *Client) UploadAssetStream(reader io.Reader, filename string, size int64
 	return "", false, fmt.Errorf("upload successful but no ID returned (response: %s)", string(resp))
 }
 
-
 func (c *Client) GetUser() (string, string, error) {
-    body, err := c.request("GET", "users/me", nil, "")
-    if err != nil {
-        return "", "", err
-    }
-    var user struct {
-        Id string `json:"id"`
-        Name string `json:"name"`
-    }
-    err = json.Unmarshal(body, &user)
-    return user.Id, user.Name, err
+	body, err := c.request("GET", "users/me", nil, "")
+	if err != nil {
+		return "", "", err
+	}
+	var user struct {
+		Id   string `json:"id"`
+		Name string `json:"name"`
+	}
+	err = json.Unmarshal(body, &user)
+	return user.Id, user.Name, err
 }
-
-
-
