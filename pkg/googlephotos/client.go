@@ -88,18 +88,22 @@ func (c *Client) doWithRetry(makeReq func() (*http.Request, error)) (*http.Respo
 			return nil, err
 		}
 
-		if resp.StatusCode != 429 {
+		// Success or client error (4xx except 429) — return immediately
+		if resp.StatusCode < 429 || (resp.StatusCode > 429 && resp.StatusCode < 500) {
 			return resp, nil
 		}
 
+		// Retryable: 429 (rate limit) or 5xx (server error)
 		resp.Body.Close()
 		sleepTime := baseBackoff * time.Duration(i+1)
-		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-			if seconds, parseErr := time.ParseDuration(retryAfter + "s"); parseErr == nil {
-				sleepTime = seconds
+		if resp.StatusCode == 429 {
+			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, parseErr := time.ParseDuration(retryAfter + "s"); parseErr == nil {
+					sleepTime = seconds
+				}
 			}
 		}
-		c.logger.Warn("Rate limited (429), retrying", "sleep", sleepTime, "attempt", i+1)
+		c.logger.Warn("Retryable HTTP error, retrying", "status", resp.StatusCode, "sleep", sleepTime, "attempt", i+1)
 		time.Sleep(sleepTime)
 	}
 

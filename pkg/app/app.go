@@ -251,7 +251,13 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Alb
 		close(results)
 	}()
 
-	// Stream results as they arrive
+	// Stream results as they arrive, flushing new assets to album every 10%
+	flushInterval := total / 10
+	if flushInterval < 1 {
+		flushInterval = 1
+	}
+	lastFlushCount := 0
+
 	for res := range results {
 		processed++
 		wasFailed := false
@@ -278,6 +284,17 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Alb
 		// Update progress tracker
 		tracker.RecordItem(res.BytesDownloaded, res.BytesUploaded, wasAdded, wasSkipped, wasFailed)
 
+		// Flush new assets to album every ~10% of total items
+		if albumId != "" && len(newAssetIds) > lastFlushCount && (processed%flushInterval == 0 || processed == total) {
+			batch := newAssetIds[lastFlushCount:]
+			logger.Info("Adding assets to album (incremental)", "count", len(batch), "progress", fmt.Sprintf("%d/%d", processed, total))
+			if err := a.Client.AddAssetsToAlbum(albumId, batch); err != nil {
+				logger.Error("Error adding assets to album", "error", err)
+			} else {
+				lastFlushCount = len(newAssetIds)
+			}
+		}
+
 		// Log progress every 100 items in debug mode
 		if a.Cfg.Debug && processed%100 == 0 {
 			logger.Debug("Progress", "processed", processed, "total", total, "added", added, "skipped", skipped, "failed", failed)
@@ -287,9 +304,11 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig, albumCache []immich.Alb
 	// Stop tracker and print final summary
 	tracker.Stop()
 
-	if albumId != "" && len(newAssetIds) > 0 {
-		logger.Info("Adding items to album", "count", len(newAssetIds), "album", albumTitle)
-		err := a.Client.AddAssetsToAlbum(albumId, newAssetIds)
+	// Flush any remaining assets not yet added
+	if albumId != "" && len(newAssetIds) > lastFlushCount {
+		batch := newAssetIds[lastFlushCount:]
+		logger.Info("Adding remaining assets to album", "count", len(batch), "album", albumTitle)
+		err := a.Client.AddAssetsToAlbum(albumId, batch)
 		if err != nil {
 			logger.Error("Error adding assets to album", "error", err)
 		}
