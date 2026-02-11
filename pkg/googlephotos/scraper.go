@@ -26,6 +26,7 @@ type Photo struct {
 	TakenAt     time.Time
 	Description string
 	Uploader    string
+	IsVideo     bool
 }
 
 // ScrapeAlbum parses a Google Photos shared album URL and returns the Album structure.
@@ -189,44 +190,15 @@ func ScrapeAlbum(url string) (*Album, error) {
 			if fh, ok := mediaArr[2].(float64); ok { h = int(fh) }
 		}
 		
-		// Metadata (Timestamp)
-		var timestamp time.Time
-		var tsMs int64
+		// Extract timestamp with improved logic
+		timestamp := extractTimestamp(itemArr, extractInt)
 
-		// 1. Check default location (often Upload Date)
-		if len(itemArr) > 2 {
-			if metaArr, ok := itemArr[2].([]interface{}); ok && len(metaArr) > 0 {
-				if t, ok := extractInt(metaArr[0]); ok {
-					tsMs = t
-				}
-			}
-		}
-
-		// 2. Check for actual Taken Date in other fields (often index 5 or 6)
-		if len(itemArr) > 5 {
-			for i := 5; i < len(itemArr); i++ {
-				// We look for any array that starts with a plausible timestamp
-				if metaGroup, ok := itemArr[i].([]interface{}); ok && len(metaGroup) > 0 {
-					if t, ok := extractInt(metaGroup[0]); ok {
-						// 1990 check (631152000000)
-						// If we found a timestamp that is older than the default one, prefer it (likely Taken Date vs Upload Date)
-						if t > 631152000000 && (tsMs == 0 || t < tsMs) {
-							tsMs = t
-						}
-					}
-				}
-			}
-		}
-
-		if tsMs > 0 {
-			timestamp = time.UnixMilli(tsMs)
-		}
-		
 		// Description/Caption
 		var description string
-		if len(itemArr) > 5 {
-			if d, ok := itemArr[5].(string); ok {
+		for i := 3; i < len(itemArr); i++ {
+			if d, ok := itemArr[i].(string); ok && d != "" {
 				description = d
+				break
 			}
 		}
 
@@ -249,25 +221,88 @@ func ScrapeAlbum(url string) (*Album, error) {
 	}, nil
 }
 
-func DownloadPhotoStream(url string) (io.ReadCloser, int64, error) {
-	// Append =d to get original
-	downloadUrl := url + "=d"
-	
+// extractTimestamp extracts the best available timestamp from a scraped item
+func extractTimestamp(itemArr []interface{}, extractInt func(interface{}) (int64, bool)) time.Time {
+	now := time.Now()
+	var candidates []int64
+
+	// Collect all plausible timestamps from the item
+	for i := 2; i < len(itemArr); i++ {
+		if metaArr, ok := itemArr[i].([]interface{}); ok && len(metaArr) > 0 {
+			if t, ok := extractInt(metaArr[0]); ok {
+				// Must be after 2000-01-01 and not in the future (with 1-day tolerance)
+				if t > 946684800000 && time.UnixMilli(t).Before(now.Add(24*time.Hour)) {
+					candidates = append(candidates, t)
+				}
+			}
+		}
+		// Also check direct numeric values at this index
+		if t, ok := extractInt(itemArr[i]); ok {
+			if t > 946684800000 && time.UnixMilli(t).Before(now.Add(24*time.Hour)) {
+				candidates = append(candidates, t)
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return time.Time{}
+	}
+
+	// Prefer the oldest valid timestamp (most likely the "taken" date)
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c < best {
+			best = c
+		}
+	}
+
+	return time.UnixMilli(best)
+}
+
+// DownloadMediaStream downloads media from Google Photos, detecting videos vs photos.
+// Uses a HEAD request to probe Content-Type first, then downloads with the correct parameter.
+// Returns: body, size, isVideo, error
+func DownloadMediaStream(baseUrl string, hintIsVideo bool) (io.ReadCloser, int64, bool, error) {
 	client := NewClient()
+	isVideo := false
+
+	// Probe with HEAD request to =dv to check if this item is a video
+	videoUrl := baseUrl + "=dv"
+	probeReq, err := http.NewRequest("HEAD", videoUrl, nil)
+	if err == nil {
+		probeReq.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		probeResp, probeErr := client.client.Do(probeReq)
+		if probeErr == nil {
+			ct := probeResp.Header.Get("Content-Type")
+			probeResp.Body.Close()
+			if probeResp.StatusCode == 200 && strings.HasPrefix(ct, "video/") {
+				isVideo = true
+			}
+		}
+	}
+
+	// Download with the correct parameter
+	var downloadUrl string
+	if isVideo {
+		downloadUrl = baseUrl + "=dv"
+	} else {
+		downloadUrl = baseUrl + "=d"
+	}
+
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	
+
 	if resp.StatusCode != 200 {
 		resp.Body.Close()
-		return nil, 0, fmt.Errorf("failed to download photo: %d", resp.StatusCode)
+		return nil, 0, false, fmt.Errorf("failed to download media: %d", resp.StatusCode)
 	}
-	
-	return resp.Body, resp.ContentLength, nil
+
+	return resp.Body, resp.ContentLength, isVideo, nil
 }
