@@ -46,7 +46,10 @@ func ReadConfig(path string) (*Config, error) {
 	}
 	defer file.Close()
 	
-	bytefile, _ := io.ReadAll(file)
+	bytefile, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("error reading config: %w", err)
+	}
 	var config Config
 	if err := json.Unmarshal(bytefile, &config); err != nil {
 		return nil, err

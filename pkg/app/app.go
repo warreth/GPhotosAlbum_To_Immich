@@ -14,9 +14,10 @@ import (
 )
 
 type App struct {
-	Cfg    *config.Config
-	Client *immich.Client
-	Logger *slog.Logger
+	Cfg      *config.Config
+	Client   *immich.Client
+	GPClient *googlephotos.Client
+	Logger   *slog.Logger
 }
 
 func New(cfg *config.Config) (*App, error) {
@@ -39,10 +40,12 @@ func New(cfg *config.Config) (*App, error) {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	client := immich.NewClient(cfg.ApiURL, cfg.ApiKey)
+	gpClient := googlephotos.NewClient()
 	return &App{
-		Cfg:    cfg,
-		Client: client,
-		Logger: logger,
+		Cfg:      cfg,
+		Client:   client,
+		GPClient: gpClient,
+		Logger:   logger,
 	}, nil
 }
 
@@ -112,12 +115,11 @@ type processResult struct {
 	Error       error
 }
 
-
 func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 	logger := a.Logger.With("album_url", ac.URL)
 	logger.Info("Syncing Google Photos Album")
 
-	album, err := googlephotos.ScrapeAlbum(ac.URL)
+	album, err := googlephotos.ScrapeAlbum(a.GPClient, ac.URL)
 	if err != nil {
 		logger.Error("Error scraping album", "error", err)
 		return
@@ -129,18 +131,23 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 	}
 	logger.Info("Found photos in album", "count", len(album.Photos), "title", albumTitle)
 
-	// Ensure Immich Album exists
-	var albumId string
+	if len(album.Photos) == 0 {
+		logger.Info("No photos found, skipping")
+		return
+	}
 
+	// Resolve Immich album ID
+	var albumId string
 	if ac.ImmichAlbumID != "" {
 		albumId = ac.ImmichAlbumID
 	} else {
-		// Find or Create by Name
-		albums, _ := a.Client.GetAlbums()
-		for _, a := range albums {
-			if a.AlbumName == albumTitle {
-				albumId = a.Id
-				break
+		albums, err := a.Client.GetAlbums()
+		if err == nil {
+			for _, a := range albums {
+				if a.AlbumName == albumTitle {
+					albumId = a.Id
+					break
+				}
 			}
 		}
 		if albumId == "" {
@@ -154,28 +161,42 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 		}
 	}
 
+	// Pre-fetch existing album assets for O(1) duplicate detection (replaces 6 API calls per photo)
+	existingFiles := make(map[string]string) // baseName (no extension) -> asset ID
+	if albumId != "" {
+		albumDetails, err := a.Client.GetAlbum(albumId)
+		if err == nil {
+			for _, asset := range albumDetails.Assets {
+				name := asset.OriginalFileName
+				if dot := strings.LastIndex(name, "."); dot != -1 {
+					name = name[:dot]
+				}
+				existingFiles[name] = asset.Id
+			}
+			logger.Debug("Pre-fetched album assets", "count", len(existingFiles))
+		}
+	}
+
 	var newAssetIds []string
-	
-	// Stats
+
 	total := len(album.Photos)
 	processed := 0
 	added := 0
+	skipped := 0
 	failed := 0
 
-	// Worker Pool Setup
 	numWorkers := a.Cfg.Workers
 	if numWorkers < 1 {
 		numWorkers = 1
 	}
-	if numWorkers > len(album.Photos) {
-		numWorkers = len(album.Photos)
+	if numWorkers > total {
+		numWorkers = total
 	}
-	if numWorkers == 0 { numWorkers = 1 }
 
 	logger.Info("Processing items", "total_items", total, "workers", numWorkers)
 
-	jobs := make(chan googlephotos.Photo, len(album.Photos))
-	results := make(chan processResult, len(album.Photos))
+	jobs := make(chan googlephotos.Photo, total)
+	results := make(chan processResult, total)
 	var wg sync.WaitGroup
 
 	for w := 0; w < numWorkers; w++ {
@@ -183,7 +204,7 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				id, uploaded, err := a.processItem(p, albumTitle, ac.URL)
+				id, uploaded, err := a.processItem(p, albumTitle, ac.URL, existingFiles)
 				results <- processResult{ID: id, WasUploaded: uploaded, Error: err}
 			}
 		}()
@@ -205,6 +226,8 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 		} else {
 			if res.WasUploaded {
 				added++
+			} else if res.ID == "" {
+				skipped++
 			}
 			if res.ID != "" {
 				newAssetIds = append(newAssetIds, res.ID)
@@ -219,40 +242,33 @@ func (a *App) processAlbum(ac config.GooglePhotosConfig) {
 			a.Logger.Error("Error adding assets to album", "error", err)
 		}
 	}
-	a.Logger.Info("Sync finished", "title", albumTitle, "added", added, "failed", failed, "total_processed", processed)
+	a.Logger.Info("Sync finished", "title", albumTitle, "added", added, "skipped", skipped, "failed", failed, "total", processed)
 }
 
-func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string) (string, bool, error) {
-	// Create a deterministic filename base
+func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string, existingFiles map[string]string) (string, bool, error) {
 	safeId := strings.ReplaceAll(p.ID, "/", "_")
 	safeId = strings.ReplaceAll(safeId, ":", "_")
 	baseName := fmt.Sprintf("gp_%s", safeId)
 
-	// Search in Immich for existing asset
-	for _, ext := range []string{".jpg", ".png", ".heic", ".mp4", ".mov", ".webp"} {
-		exists, _ := a.Client.SearchAssets(baseName + ext)
-		if len(exists) > 0 {
-			existingID := exists[0].Id
-			a.Logger.Debug("Asset already exists", "id", existingID, "filename", baseName+ext)
-			return existingID, false, nil
-		}
+	// O(1) check against pre-fetched album assets (replaces 6 API calls per photo)
+	if assetId, exists := existingFiles[baseName]; exists {
+		a.Logger.Debug("Asset already in album", "id", assetId, "filename", baseName)
+		return "", false, nil
 	}
 
-	// Enforce strict metadata: skip items without a valid date
 	if a.Cfg.StrictMetadata && p.TakenAt.IsZero() {
 		a.Logger.Warn("Skipping item with missing metadata date",
 			"id", p.ID, "url", p.URL)
 		return "", false, nil
 	}
 
-	// Download media from Google Photos (images are fetched as pure stills)
+	// Download original media from Google Photos (=d for original quality)
 	a.Logger.Debug("Downloading item", "id", safeId)
-	r, size, ext, isVideo, err := googlephotos.DownloadMedia(p.URL, p.Width, p.Height)
+	r, size, ext, isVideo, err := googlephotos.DownloadMedia(a.GPClient, p.URL)
 	if err != nil {
 		return "", false, fmt.Errorf("error downloading item: %w", err)
 	}
 
-	// Skip videos if configured
 	if isVideo && a.Cfg.SkipVideos {
 		r.Close()
 		a.Logger.Debug("Skipping video item", "id", p.ID)
@@ -261,7 +277,7 @@ func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string) (st
 
 	filename := baseName + ext
 
-	// Build description
+	// Build description with source metadata
 	description := p.Description
 	if p.Uploader != "" {
 		if description != "" {
@@ -275,7 +291,6 @@ func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string) (st
 	}
 	description += fmt.Sprintf("%sSource Album: %s (%s)", sep, albumTitle, albumURL)
 
-	// Log warning for items with missing date
 	if p.TakenAt.IsZero() {
 		a.Logger.Warn("Uploading item with missing metadata date (using current time)",
 			"id", safeId, "url", p.URL, "is_video", isVideo)
@@ -291,7 +306,7 @@ func (a *App) processItem(p googlephotos.Photo, albumTitle, albumURL string) (st
 	}
 
 	if isDup {
-		a.Logger.Debug("Item already exists (deduplicated)", "filename", filename, "id", uploadedId)
+		a.Logger.Debug("Asset deduplicated by Immich", "filename", filename, "id", uploadedId)
 		return uploadedId, false, nil
 	}
 

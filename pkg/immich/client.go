@@ -105,6 +105,17 @@ func (c *Client) GetAlbums() ([]Album, error) {
 	return albums, err
 }
 
+// GetAlbum fetches a single album with its full asset list
+func (c *Client) GetAlbum(albumId string) (*Album, error) {
+	body, err := c.request("GET", fmt.Sprintf("albums/%s", albumId), nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var album Album
+	err = json.Unmarshal(body, &album)
+	return &album, err
+}
+
 func (c *Client) CreateAlbum(name string) (*Album, error) {
 	payload := map[string]string{"albumName": name}
 	jsonPayload, _ := json.Marshal(payload)

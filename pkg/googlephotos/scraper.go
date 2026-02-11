@@ -1,11 +1,11 @@
 package googlephotos
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
-	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,8 +30,7 @@ type Photo struct {
 }
 
 // ScrapeAlbum parses a Google Photos shared album URL and returns the Album structure.
-func ScrapeAlbum(url string) (*Album, error) {
-	client := NewClient()
+func ScrapeAlbum(client *Client, url string) (*Album, error) {
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
@@ -291,74 +290,60 @@ func extensionFromContentType(contentType string) string {
 	}
 }
 
-// DownloadMedia downloads media from Google Photos as a plain image or video.
-// For images (including motion photos), uses =w{W}-h{H} to get the pure still image
-// without any embedded video data. For pure videos, uses =dv.
+// DownloadMedia downloads original media from Google Photos.
+// Uses =d for original quality images (preserves motion photo data for Immich), =dv for videos.
+// Response is buffered to guarantee accurate Content-Length for the upload.
 // Returns: body, size, extension (e.g. ".jpg"), isVideo, error
-func DownloadMedia(baseUrl string, width int, height int) (io.ReadCloser, int64, string, bool, error) {
-	client := NewClient()
-
-	// First, probe with =d to check if this is a video
-	probeReq, err := http.NewRequest("HEAD", baseUrl+"=d", nil)
+func DownloadMedia(client *Client, baseUrl string) (io.ReadCloser, int64, string, bool, error) {
+	// HEAD probe to detect content type without downloading body
+	probeResp, err := client.Head(baseUrl + "=d")
 	if err != nil {
 		return nil, 0, "", false, err
 	}
-	probeReq.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-	probeResp, err := client.client.Do(probeReq)
-	if err != nil {
-		return nil, 0, "", false, err
-	}
-	probeCt := probeResp.Header.Get("Content-Type")
 	probeResp.Body.Close()
 
-	// Pure video: download via =dv
-	if strings.HasPrefix(strings.ToLower(probeCt), "video/") {
-		vReq, err := http.NewRequest("GET", baseUrl+"=dv", nil)
+	probeCt := probeResp.Header.Get("Content-Type")
+	isVideo := strings.HasPrefix(strings.ToLower(probeCt), "video/")
+
+	// Pure video: download with =dv
+	if isVideo {
+		resp, err := client.Get(baseUrl + "=dv")
 		if err != nil {
 			return nil, 0, "", false, err
 		}
-
-		vResp, err := client.Do(vReq)
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			return nil, 0, "", false, fmt.Errorf("failed to download video: %d", resp.StatusCode)
+		}
+		// Buffer video for accurate size
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
-			return nil, 0, "", false, err
+			return nil, 0, "", false, fmt.Errorf("failed to read video data: %w", err)
 		}
-
-		if vResp.StatusCode != 200 {
-			vResp.Body.Close()
-			return nil, 0, "", false, fmt.Errorf("failed to download video: %d", vResp.StatusCode)
-		}
-
-		vCt := vResp.Header.Get("Content-Type")
-		vExt := extensionFromContentType(vCt)
-		return vResp.Body, vResp.ContentLength, vExt, true, nil
+		ct := resp.Header.Get("Content-Type")
+		ext := extensionFromContentType(ct)
+		return io.NopCloser(bytes.NewReader(data)), int64(len(data)), ext, true, nil
 	}
 
-	// Image (including motion photos): use =w{W}-h{H} to get pure image without embedded video
-	if width <= 0 {
-		width = 16383
-	}
-	if height <= 0 {
-		height = 16383
-	}
-	imgUrl := fmt.Sprintf("%s=w%d-h%d", baseUrl, width, height)
-
-	req, err := http.NewRequest("GET", imgUrl, nil)
+	// Image: download original with =d (motion photos are preserved as-is for Immich)
+	resp, err := client.Get(baseUrl + "=d")
 	if err != nil {
 		return nil, 0, "", false, err
 	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, "", false, err
-	}
-
 	if resp.StatusCode != 200 {
 		resp.Body.Close()
 		return nil, 0, "", false, fmt.Errorf("failed to download image: %d", resp.StatusCode)
 	}
 
+	// Buffer to guarantee accurate size (HTTP Content-Length can be -1 for chunked responses)
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, 0, "", false, fmt.Errorf("failed to read image data: %w", err)
+	}
+
 	ct := resp.Header.Get("Content-Type")
 	ext := extensionFromContentType(ct)
-	return resp.Body, resp.ContentLength, ext, false, nil
+	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), ext, false, nil
 }

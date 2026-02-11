@@ -7,10 +7,7 @@ import (
 	"time"
 )
 
-// HTTPClient interface to allow mocking or swapping standard client
-type HTTPClient interface {
-	Do(req *http.Request) (*http.Response, error)
-}
+const userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 type Client struct {
 	client *http.Client
@@ -32,21 +29,27 @@ func (c *Client) Get(url string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Add user-agent to look more like a browser
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	return c.Do(req)
 }
 
+// Head performs a lightweight HEAD request without jitter (used for content-type probing)
+func (c *Client) Head(url string) (*http.Response, error) {
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	return c.client.Do(req)
+}
+
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	// 1. Random pause (jitter) to avoid burst patterns
-	// Sleep between 500ms and 1500ms
 	jitter := time.Duration(500+rand.Intn(1000)) * time.Millisecond
 	time.Sleep(jitter)
 
 	var resp *http.Response
 	var err error
 
-	// 2. Retry Logic
 	maxRetries := 5
 	backoff := 5 * time.Second
 
