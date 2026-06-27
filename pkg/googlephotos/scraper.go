@@ -678,6 +678,53 @@ func isVideoMagicBytes(data []byte) bool {
 	return false
 }
 
+// isImageMagicBytes checks if data starts with known image file signatures.
+// Used to distinguish real image content from video poster frames so that
+// iOS Live Photo JPEG components are not accidentally replaced by their
+// paired .MOV sidecar.
+func isImageMagicBytes(data []byte) bool {
+	if len(data) < 12 {
+		return false
+	}
+	// JPEG: FF D8 FF
+	if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+		return true
+	}
+	// PNG: 89 50 4E 47 0D 0A 1A 0A
+	if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+		return true
+	}
+	// GIF: GIF87a or GIF89a
+	if string(data[0:3]) == "GIF" {
+		return true
+	}
+	// WebP: RIFF....WEBP
+	if string(data[0:4]) == "RIFF" && len(data) >= 12 && string(data[8:12]) == "WEBP" {
+		return true
+	}
+	// HEIC/HEIF: ftyp box with heic/mif1/heif brand
+	if string(data[4:8]) == "ftyp" && len(data) >= 12 {
+		brand := string(data[8:12])
+		if brand == "heic" || brand == "mif1" || brand == "heif" || brand == "heix" {
+			return true
+		}
+	}
+	// AVIF: ftyp box with avif brand
+	if string(data[4:8]) == "ftyp" && len(data) >= 12 && string(data[8:12]) == "avif" {
+		return true
+	}
+	// TIFF: II (little-endian) or MM (big-endian)
+	if (data[0] == 0x49 && data[1] == 0x49 && data[2] == 0x2A && data[3] == 0x00) ||
+		(data[0] == 0x4D && data[1] == 0x4D && data[2] == 0x00 && data[3] == 0x2A) {
+		return true
+	}
+	// BMP: BM
+	if data[0] == 0x42 && data[1] == 0x4D {
+		return true
+	}
+	return false
+}
+
 // DownloadMedia downloads original media from Google Photos.
 // It always tries =d first so motion photos are fetched as their JPEG container
 // (e.g. *.MP.jpg) instead of the short motion-video stream from =dv.
@@ -740,7 +787,12 @@ func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte,
 
 	// Some Google Photos shared-album video items may return an image poster on =d.
 	// If this is not a motion-photo container, probe =dv and treat valid video as the primary asset.
-	if !hasMotionPhotoXMP(data) {
+	// However, skip this replacement when =d returned genuine image data (confirmed by both
+	// Content-Type and magic bytes). This prevents iOS Live Photo JPEG components from being
+	// silently replaced by their paired .MOV sidecar — the caller (processItem) handles
+	// sidecar discovery and Live Photo pairing separately.
+	isConfirmedImage := strings.HasPrefix(strings.ToLower(ct), "image/") && isImageMagicBytes(data)
+	if !hasMotionPhotoXMP(data) && !isConfirmedImage {
 		if sidecarData, sidecarExt, sidecarErr := DownloadMotionVideoSidecar(ctx, client, baseUrl); sidecarErr == nil {
 			return sidecarData, sidecarExt, true, nil
 		}

@@ -481,6 +481,26 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 			}
 		}
 
+		// iOS Live Photos: no motion XMP in the JPEG, but Google Photos
+		// still exposes the paired .MOV via the =dv sidecar endpoint.
+		// Probe for it so we can upload both components and link them as
+		// a Live Photo in Immich.
+		if !isMotion && !hadMotionXMP {
+			sidecarData, sidecarExt, sidecarErr := googlephotos.DownloadMotionVideoSidecar(ctx, a.GPClient, p.URL)
+			if sidecarErr == nil {
+				videoData = sidecarData
+				isMotion = true
+				if sidecarExt != "" {
+					motionVideoExt = sidecarExt
+				}
+				a.Logger.Debug("iOS Live Photo sidecar downloaded",
+					"id", safeId,
+					"video_size", len(videoData),
+				)
+			}
+			// If no sidecar found, this is just a regular image — no action needed.
+		}
+
 		if isMotion {
 			a.Logger.Debug("Detected motion photo",
 				"id", safeId,
