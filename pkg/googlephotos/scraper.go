@@ -728,16 +728,16 @@ func isImageMagicBytes(data []byte) bool {
 // DownloadMedia downloads original media from Google Photos.
 // It always tries =d first so motion photos are fetched as their JPEG container
 // (e.g. *.MP.jpg) instead of the short motion-video stream from =dv.
-func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte, string, bool, error) {
+func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte, string, bool, bool, error) {
 	// Always fetch =d first. For motion photos this is the image container file.
 	resp, err := client.Get(ctx, baseUrl+"=d")
 	if err != nil {
-		return nil, "", false, fmt.Errorf("download failed: %w", err)
+		return nil, "", false, false, fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, "", false, fmt.Errorf("download returned status %d", resp.StatusCode)
+		return nil, "", false, false, fmt.Errorf("download returned status %d", resp.StatusCode)
 	}
 
 	ct := resp.Header.Get("Content-Type")
@@ -746,23 +746,23 @@ func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte,
 	if strings.HasPrefix(strings.ToLower(ct), "video/") {
 		resp2, err := client.Get(ctx, baseUrl+"=dv")
 		if err != nil {
-			return nil, "", false, fmt.Errorf("video re-download failed: %w", err)
+			return nil, "", false, false, fmt.Errorf("video re-download failed: %w", err)
 		}
 		defer resp2.Body.Close()
 		if resp2.StatusCode == 200 {
 			videoCt := resp2.Header.Get("Content-Type")
 			videoData, err := io.ReadAll(resp2.Body)
 			if err != nil {
-				return nil, "", false, fmt.Errorf("failed to read video response body: %w", err)
+				return nil, "", false, false, fmt.Errorf("failed to read video response body: %w", err)
 			}
 			ext := extensionFromContentType(videoCt)
-			return videoData, ext, true, nil
+			return videoData, ext, true, false, nil
 		}
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("failed to read response body: %w", err)
+		return nil, "", false, false, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	// If =d is actually a video item, prefer =dv for the original video stream.
@@ -770,31 +770,29 @@ func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte,
 	if isVideo {
 		resp2, err := client.Get(ctx, baseUrl+"=dv")
 		if err != nil {
-			return nil, "", false, fmt.Errorf("video re-download failed: %w", err)
+			return nil, "", false, false, fmt.Errorf("video re-download failed: %w", err)
 		}
 		defer resp2.Body.Close()
 		if resp2.StatusCode == 200 {
 			videoCt := resp2.Header.Get("Content-Type")
 			videoData, err := io.ReadAll(resp2.Body)
 			if err != nil {
-				return nil, "", false, fmt.Errorf("failed to read video response body: %w", err)
+				return nil, "", false, false, fmt.Errorf("failed to read video response body: %w", err)
 			}
 			ext := extensionFromContentType(videoCt)
-			return videoData, ext, true, nil
+			return videoData, ext, true, false, nil
 		}
 		// =dv failed, fall through and use the =d data as-is
 	}
 
 	// Some Google Photos shared-album video items may return an image poster on =d.
-	// If this is not a motion-photo container, probe =dv and treat valid video as the primary asset.
-	// However, skip this replacement when =d returned genuine image data (confirmed by both
-	// Content-Type and magic bytes). This prevents iOS Live Photo JPEG components from being
-	// silently replaced by their paired .MOV sidecar — the caller (processItem) handles
-	// sidecar discovery and Live Photo pairing separately.
-	isConfirmedImage := strings.HasPrefix(strings.ToLower(ct), "image/") && isImageMagicBytes(data)
-	if !hasMotionPhotoXMP(data) && !isConfirmedImage {
+	// Probe =dv and classify the result as either a live-photo sidecar or a standalone video.
+	if !hasMotionPhotoXMP(data) {
 		if sidecarData, sidecarExt, sidecarErr := DownloadMotionVideoSidecar(ctx, client, baseUrl); sidecarErr == nil {
-			return sidecarData, sidecarExt, true, nil
+			if isLikelyLivePhotoSidecar(sidecarData) {
+				return data, extensionFromContentType(ct), false, true, nil
+			}
+			return sidecarData, sidecarExt, true, false, nil
 		}
 	}
 
@@ -802,7 +800,24 @@ func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte,
 	// If =dv retry failed but Content-Type indicated video, trust that classification.
 	isVideoFinal := strings.HasPrefix(strings.ToLower(ct), "video/") || isVideoMagicBytes(data)
 	ext := extensionFromContentType(ct)
-	return data, ext, isVideoFinal, nil
+	return data, ext, isVideoFinal, false, nil
+}
+
+func isLikelyLivePhotoSidecar(data []byte) bool {
+	if len(data) > 25*1024*1024 {
+		return false
+	}
+	markers := [][]byte{
+		[]byte("com.apple.quicktime.still-image-time"),
+		[]byte("com.apple.quicktime.content.identifier"),
+		[]byte("com.apple.quicktime.live-photo"),
+	}
+	for _, marker := range markers {
+		if bytes.Contains(data, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // DownloadMotionVideoSidecar fetches the motion sidecar stream (if present) for an image item.
