@@ -4,6 +4,10 @@ For advanced setups, environments where a Web UI is undesirable, or fully automa
 
 If you don't use the Web UI, you can disable it entirely by setting the `DISABLE_WEBUI=true` environment variable.
 
+## Environment Variables
+
+The `IMMICH_API_KEY` and `IMMICH_API_URL` environment variables override the corresponding `config.json` values at runtime. This is useful for key rotation: update the ENV var on your container and the next config read picks it up, even if a `config.json` with an older key exists. When neither ENV var is set, `config.json` is used unchanged. If neither the file nor the ENV vars provide credentials, the app waits for configuration via the Web UI (or exits if the Web UI is disabled).
+
 ## API Permissions
 
 Your Immich API key needs these permissions (or use "All" for simplicity):
