@@ -415,7 +415,7 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 	}
 
 	a.Logger.Debug("Downloading item", "id", safeId)
-	data, ext, isVideo, err := googlephotos.DownloadMedia(ctx, a.GPClient, p.URL)
+	data, ext, isVideo, isLivePhoto, err := googlephotos.DownloadMedia(ctx, a.GPClient, p.URL)
 	if err != nil {
 		return "", false, 0, 0, fmt.Errorf("error downloading item: %w", err)
 	}
@@ -441,6 +441,13 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 	}
 
 	filename := baseName + ext
+	if isVideo {
+		a.Logger.Debug("Classified item as video",
+			"id", safeId,
+			"filename", filename,
+			"ext", ext,
+		)
+	}
 
 	description := p.Description
 	sep := "\n"
@@ -458,8 +465,9 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 	if !isVideo {
 		imageData, videoData, isMotion, hadMotionXMP := googlephotos.ExtractMotionPhoto(data, a.Logger)
 		motionVideoExt := ".mp4"
-
-		// Some Google motion photos expose video as sidecar (=dv) instead of embedded bytes.
+		// Some Motion Photos contain identifying XMP metadata while Google
+		// serves the video component separately through the =dv endpoint.
+		// Preserve upstream's sidecar behavior for those files.
 		if !isMotion && hadMotionXMP {
 			sidecarData, sidecarExt, sidecarErr := googlephotos.DownloadMotionVideoSidecar(ctx, a.GPClient, p.URL)
 			if sidecarErr == nil {
@@ -481,11 +489,9 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 			}
 		}
 
-		// iOS Live Photos: no motion XMP in the JPEG, but Google Photos
-		// still exposes the paired .MOV via the =dv sidecar endpoint.
-		// Probe for it so we can upload both components and link them as
-		// a Live Photo in Immich.
-		if !isMotion && !hadMotionXMP {
+		// For images without Motion Photo XMP, use the Apple QuickTime
+		// metadata detected by DownloadMedia to identify a Live Photo.
+		if !isMotion && !hadMotionXMP && isLivePhoto {
 			sidecarData, sidecarExt, sidecarErr := googlephotos.DownloadMotionVideoSidecar(ctx, a.GPClient, p.URL)
 			if sidecarErr == nil {
 				videoData = sidecarData
@@ -493,12 +499,11 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 				if sidecarExt != "" {
 					motionVideoExt = sidecarExt
 				}
-				a.Logger.Debug("iOS Live Photo sidecar downloaded",
+				a.Logger.Debug("Live photo sidecar downloaded",
 					"id", safeId,
 					"video_size", len(videoData),
 				)
 			}
-			// If no sidecar found, this is just a regular image — no action needed.
 		}
 
 		if isMotion {
@@ -578,4 +583,3 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 	a.Logger.Debug("Uploaded item", "filename", filename, "id", uploadedId)
 	return uploadedId, true, bytesDownloaded, bytesUploaded, nil
 }
-
