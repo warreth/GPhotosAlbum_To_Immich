@@ -58,9 +58,15 @@ func ReadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Override/Fallback with ENV
-	if config.ApiKey == "" { config.ApiKey = os.Getenv("IMMICH_API_KEY") }
-	if config.ApiURL == "" { config.ApiURL = os.Getenv("IMMICH_API_URL") }
+	// ENV vars take runtime precedence over the config file so rotated
+	// keys (e.g. a new IMMICH_API_KEY deployed via container ENV) are picked
+	// up on the next config read instead of causing auth crash loops.
+	if v := os.Getenv("IMMICH_API_KEY"); v != "" {
+		config.ApiKey = v
+	}
+	if v := os.Getenv("IMMICH_API_URL"); v != "" {
+		config.ApiURL = v
+	}
 
 	config.ApiKey = strings.TrimSpace(config.ApiKey)
 	config.ApiURL = strings.TrimSpace(config.ApiURL)
