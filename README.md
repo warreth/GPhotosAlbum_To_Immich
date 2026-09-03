@@ -21,6 +21,8 @@ Sync photos from Google Photos shared albums to your [Immich](https://immich.app
        environment:
          - PORT=8080 # Port for the Web UI
          - DISABLE_WEBUI=false # Set to true to fully disable the Web UI
+         # - IMMICH_API_KEY=your-key # Overrides config.json when set (e.g. for key rotation)
+         # - IMMICH_API_URL=http://immich-server:2283/api # Overrides config.json when set
        volumes:
          - ./config.json:/app/config.json # Optional, will be created by Web UI if omitted
          - ./data:/app/data # Persistent dedup cache (survives container restarts)
@@ -47,6 +49,14 @@ To sync photos, generate an Immich API key with the following permissions (or ju
 `asset.read` · `asset.upload` · `album.create` · `album.read` · `album.update` · `albumAsset.create` · `user.read`
 
 ---
+
+## Frequently Asked Questions
+
+**Can this sync albums I don't own, or private albums?**
+Only public shared album links work. The tool scrapes shared-album URLs without any Google authentication by design, so an album must be viewable by anyone with the link (test it in an incognito window). Private albums and links that require signing in return 404 and cannot be supported without full Google account authentication, which is out of scope.
+
+**Why do I get duplicates in Immich when I already have the same photos?**
+Google Photos serves re-encoded (compressed) copies for shared albums, so their checksums differ from your originals and Immich's content-hash duplicate detection cannot match them. Nothing can be fixed on this tool's side; use Immich's built-in duplicate review after syncing to clean them up.
 
 ## Features
 
