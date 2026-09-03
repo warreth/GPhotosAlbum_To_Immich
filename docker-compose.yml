@@ -3,12 +3,14 @@ services:
     build: .
     container_name: gphotos2immich
     network_mode: "host"
+    # Matches the UID/GID of the non-root 'app' user created in the Dockerfile.
+    user: "1000:1000"
     environment:
       - TZ=UTC
       - PORT=8080 # Port for the Web UI
       - DISABLE_WEBUI=false # Set to true to fully disable the Web UI
-      # - IMMICH_API_KEY=your-key # If not using config.json
-      # - IMMICH_API_URL=http://immich-server/api # If not using config.json
+      # - IMMICH_API_KEY=your-key # Overrides config.json when set
+      # - IMMICH_API_URL=http://immich-server:2283/api # Overrides config.json when set
     volumes:
       - ./config.json:/app/config.json # Mount the config file (create it with your settings)
       - ./data:/app/data # Persistent dedup state (survives container restarts)
