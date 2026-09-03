@@ -804,9 +804,6 @@ func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte,
 }
 
 func isLikelyLivePhotoSidecar(data []byte) bool {
-	if len(data) > 25*1024*1024 {
-		return false
-	}
 	markers := [][]byte{
 		[]byte("com.apple.quicktime.still-image-time"),
 		[]byte("com.apple.quicktime.content.identifier"),

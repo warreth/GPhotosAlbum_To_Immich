@@ -465,11 +465,33 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 	if !isVideo {
 		imageData, videoData, isMotion, hadMotionXMP := googlephotos.ExtractMotionPhoto(data, a.Logger)
 		motionVideoExt := ".mp4"
-		if hadMotionXMP && !isMotion {
-			googlephotos.StripMotionPhotoXMP(imageData)
+		// Some Motion Photos contain identifying XMP metadata while Google
+		// serves the video component separately through the =dv endpoint.
+		// Preserve upstream's sidecar behavior for those files.
+		if !isMotion && hadMotionXMP {
+			sidecarData, sidecarExt, sidecarErr := googlephotos.DownloadMotionVideoSidecar(ctx, a.GPClient, p.URL)
+			if sidecarErr == nil {
+				videoData = sidecarData
+				isMotion = true
+				if sidecarExt != "" {
+					motionVideoExt = sidecarExt
+				}
+				a.Logger.Debug("Motion photo sidecar downloaded",
+					"id", safeId,
+					"video_size", len(videoData),
+				)
+			} else {
+				a.Logger.Debug("Motion XMP found but sidecar unavailable, stripping XMP flags",
+					"id", safeId,
+					"error", sidecarErr,
+				)
+				googlephotos.StripMotionPhotoXMP(imageData)
+			}
 		}
 
-		if !isMotion && isLivePhoto {
+		// For images without Motion Photo XMP, use the Apple QuickTime
+		// metadata detected by DownloadMedia to identify a Live Photo.
+		if !isMotion && !hadMotionXMP && isLivePhoto {
 			sidecarData, sidecarExt, sidecarErr := googlephotos.DownloadMotionVideoSidecar(ctx, a.GPClient, p.URL)
 			if sidecarErr == nil {
 				videoData = sidecarData
