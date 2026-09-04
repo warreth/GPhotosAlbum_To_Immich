@@ -171,6 +171,109 @@ func scrapeTestAlbum(t *testing.T) *Album {
 	return album
 }
 
+// iPhone test album (fedonr's reproduction case for videos being classified
+// as live photos): three iPhone MOVs, one Pixel MP4 and one Pixel motion photo.
+const iphoneAlbumURL = "https://photos.app.goo.gl/z9qUNvwK1sWpPhQ8A"
+
+var integrationIPhoneAlbum *Album
+
+func scrapeIPhoneAlbum(t *testing.T) *Album {
+	t.Helper()
+	if integrationIPhoneAlbum != nil {
+		return integrationIPhoneAlbum
+	}
+	if os.Getenv("GP2IMMICH_INTEGRATION") != "1" {
+		t.Skip("integration test against the real iPhone test album; set GP2IMMICH_INTEGRATION=1 to run")
+	}
+	client := integrationClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	album, err := ScrapeAlbum(ctx, client, iphoneAlbumURL)
+	if err != nil {
+		t.Fatalf("failed to scrape iPhone test album: %v", err)
+	}
+	integrationIPhoneAlbum = album
+	return album
+}
+
+// TestIntegrationScrapeIPhoneAlbum verifies the scraper marks the iPhone
+// album's four videos (three MOV clips and one Pixel MP4) as videos from the
+// album metadata alone, before any bytes are fetched.
+func TestIntegrationScrapeIPhoneAlbum(t *testing.T) {
+	album := scrapeIPhoneAlbum(t)
+
+	if album.Title != "Test Vid" {
+		t.Fatalf("unexpected album title %q", album.Title)
+	}
+	if len(album.Photos) != 5 {
+		t.Fatalf("expected 5 items in iPhone test album, got %d", len(album.Photos))
+	}
+	for i, p := range album.Photos {
+		wantVideo := i == 0 || i == 1 || i == 2 || i == 4
+		if p.IsVideo != wantVideo {
+			t.Fatalf("item %d: expected IsVideo=%v", i, wantVideo)
+		}
+	}
+}
+
+// TestIntegrationDownloadIPhoneAlbum downloads every item of the iPhone test
+// album through the item-aware path and verifies the real files arrive:
+// the iPhone MOVs must be standalone videos even though their streams carry
+// Apple Live Photo QuickTime tags, and the Pixel motion photo must keep its
+// photo+video container (ExtractMotionPhoto splits it during upload).
+func TestIntegrationDownloadIPhoneAlbum(t *testing.T) {
+	album := scrapeIPhoneAlbum(t)
+	client := integrationClient()
+	ctx := context.Background()
+
+	videos, photos := 0, 0
+	for i, p := range album.Photos {
+		media, err := DownloadItemMedia(ctx, client, p)
+		if err != nil {
+			t.Fatalf("item %d (%s): download failed: %v", i, p.ID, err)
+		}
+		switch media.Kind {
+		case "video":
+			videos++
+			if media.VideoData != nil {
+				t.Fatalf("item %d: standalone video carries a sidecar", i)
+			}
+			if !isVideoMagicBytes(media.Data) {
+				t.Fatalf("item %d: video bytes are not a video container", i)
+			}
+			if !isVideoExt(media.Ext) {
+				t.Fatalf("item %d: video has non-video extension %q", i, media.Ext)
+			}
+			// A poster frame is a tiny JPEG; a real video stream is at least 1 MB.
+			if len(media.Data) < 1_000_000 {
+				t.Fatalf("item %d: video payload too small to be the real stream (%d bytes)", i, len(media.Data))
+			}
+			if isLikelyLivePhotoSidecar(media.Data) {
+				t.Logf("item %d: video stream carries Apple live-photo tags (the regression case)", i)
+			}
+		case "image":
+			photos++
+			cfg, _, err := image.DecodeConfig(bytes.NewReader(media.Data))
+			if err != nil {
+				t.Fatalf("item %d: downloaded bytes do not decode as an image (%v)", i, err)
+			}
+			if cfg.Width != p.Width || cfg.Height != p.Height {
+				t.Fatalf("item %d: downloaded image is %dx%d but album serves %dx%d (not the original file)",
+					i, cfg.Width, cfg.Height, p.Width, p.Height)
+			}
+		default:
+			t.Fatalf("item %d: unexpected media kind %q", i, media.Kind)
+		}
+	}
+
+	if videos != 4 {
+		t.Errorf("expected 4 videos in iPhone test album, got %d", videos)
+	}
+	if photos != 1 {
+		t.Errorf("expected 1 photo in iPhone test album, got %d", photos)
+	}
+}
+
 // isVideoExt reports whether ext is a known video extension.
 func isVideoExt(ext string) bool {
 	switch ext {

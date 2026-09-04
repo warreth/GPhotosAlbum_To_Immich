@@ -415,12 +415,16 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 	}
 
 	a.Logger.Debug("Downloading item", "id", safeId)
-	data, ext, isVideo, isLivePhoto, err := googlephotos.DownloadMedia(ctx, a.GPClient, p.URL)
+	media, err := googlephotos.DownloadItemMedia(ctx, a.GPClient, p)
 	if err != nil {
 		return "", false, 0, 0, fmt.Errorf("error downloading item: %w", err)
 	}
+	data, ext, isVideo := media.Data, media.Ext, media.Kind == "video"
 
 	bytesDownloaded := int64(len(data))
+	if len(media.VideoData) > 0 {
+		bytesDownloaded += int64(len(media.VideoData))
+	}
 
 	// For videos, also check both existingFiles and globalAssets by full filename to catch video dedup
 	if isVideo {
@@ -489,21 +493,18 @@ func (a *App) processItem(ctx context.Context, p googlephotos.Photo, albumTitle,
 			}
 		}
 
-		// For images without Motion Photo XMP, use the Apple QuickTime
-		// metadata detected by DownloadMedia to identify a Live Photo.
-		if !isMotion && !hadMotionXMP && isLivePhoto {
-			sidecarData, sidecarExt, sidecarErr := googlephotos.DownloadMotionVideoSidecar(ctx, a.GPClient, p.URL)
-			if sidecarErr == nil {
-				videoData = sidecarData
-				isMotion = true
-				if sidecarExt != "" {
-					motionVideoExt = sidecarExt
-				}
-				a.Logger.Debug("Live photo sidecar downloaded",
-					"id", safeId,
-					"video_size", len(videoData),
-				)
+		// Live photos detected via Apple QuickTime sidecar metadata: the
+		// video component was already fetched by DownloadItemMedia.
+		if !isMotion && !hadMotionXMP && media.Kind == "live" {
+			videoData = media.VideoData
+			isMotion = true
+			if media.VideoExt != "" {
+				motionVideoExt = media.VideoExt
 			}
+			a.Logger.Debug("Live photo sidecar downloaded",
+				"id", safeId,
+				"video_size", len(videoData),
+			)
 		}
 
 		if isMotion {
