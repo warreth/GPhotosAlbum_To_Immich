@@ -1,6 +1,14 @@
 package googlephotos
 
-import "testing"
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestIsLikelyLivePhotoSidecar(t *testing.T) {
 	marker := []byte("com.apple.quicktime.content.identifier")
@@ -30,4 +38,35 @@ func TestIsLikelyLivePhotoSidecar(t *testing.T) {
 			t.Fatal("ordinary video without Apple Live Photo metadata was misclassified")
 		}
 	})
+}
+
+func TestDownloadMediaDoesNotProbeVideoForConfirmedImage(t *testing.T) {
+	videoProbeCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.RawQuery, "=dv") || strings.HasSuffix(r.URL.String(), "=dv") {
+			videoProbeCount++
+			http.Error(w, "unexpected video probe", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0})
+	}))
+	defer server.Close()
+
+	client := &Client{
+		client: server.Client(),
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	_, ext, isVideo, isLivePhoto, err := DownloadMedia(context.Background(), client, server.URL+"/media?")
+	if err != nil {
+		t.Fatalf("DownloadMedia returned an error: %v", err)
+	}
+	if videoProbeCount != 0 {
+		t.Fatalf("expected no =dv request for a confirmed JPEG, got %d", videoProbeCount)
+	}
+	if ext != ".jpg" || isVideo || isLivePhoto {
+		t.Fatalf("unexpected classification: ext=%q isVideo=%v isLivePhoto=%v", ext, isVideo, isLivePhoto)
+	}
 }

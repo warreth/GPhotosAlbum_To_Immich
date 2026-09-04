@@ -786,8 +786,11 @@ func DownloadMedia(ctx context.Context, client *Client, baseUrl string) ([]byte,
 	}
 
 	// Some Google Photos shared-album video items may return an image poster on =d.
-	// Probe =dv and classify the result as either a live-photo sidecar or a standalone video.
-	if !hasMotionPhotoXMP(data) {
+	// Do not probe =dv for confirmed still images: Google may serve a large or slow
+	// payload there, which can block the album worker for an otherwise normal photo.
+	// Embedded Motion Photos are handled above/below via their XMP metadata.
+	isConfirmedImage := strings.HasPrefix(strings.ToLower(ct), "image/") && isImageMagicBytes(data)
+	if !hasMotionPhotoXMP(data) && !isConfirmedImage {
 		if sidecarData, sidecarExt, sidecarErr := DownloadMotionVideoSidecar(ctx, client, baseUrl); sidecarErr == nil {
 			if isLikelyLivePhotoSidecar(sidecarData) {
 				return data, extensionFromContentType(ct), false, true, nil
