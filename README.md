@@ -34,6 +34,19 @@ Sync photos from Google Photos shared albums to your [Immich](https://immich.app
 
 2. Open **[http://localhost:8080](http://localhost:8080)** in your browser to configure your Immich API details and Google Photos shared album links via the Web UI! The app will automatically hot-reload when you save changes.
 
+### Docker image tags
+
+The image is published to `ghcr.io/warreth/gphotos2immich` with these tags:
+
+| Tag | Description |
+| --- | --- |
+| `latest` | Newest **stable** release. Pre-releases never get this tag. |
+| `beta` | Newest **pre-release** (e.g. `v1.7.0-beta1`). Updated on every pre-release. |
+| `vX.Y.Z` | Exact release version, e.g. `v1.7.0`. |
+| `sha-<hash>` | Build pinned to a specific commit. |
+
+To test a pre-release, use `ghcr.io/warreth/gphotos2immich:beta` in your compose file. Stable users should stay on `latest` or a pinned `vX.Y.Z` tag.
+
 <br/>
 
 > [!IMPORTANT]

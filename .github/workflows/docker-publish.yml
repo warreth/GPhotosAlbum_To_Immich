@@ -41,11 +41,15 @@ jobs:
               uses: docker/metadata-action@v5
               with:
                   images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+                  # latest=auto would also tag pre-releases as latest; drive latest/beta explicitly instead
+                  flavor: |
+                      latest=false
                   tags: |
-                      type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
-                      type=sha
+                      type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
+                      type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease == true }}
                       type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
                       type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version != '' }}
+                      type=sha
 
             - name: Build and push Docker image
               uses: docker/build-push-action@v5
