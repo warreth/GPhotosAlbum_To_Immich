@@ -37,6 +37,7 @@ type Photo struct {
 	URL         string
 	Width       int
 	Height      int
+	IsVideo     bool
 	TakenAt     time.Time
 	Description string
 }
@@ -313,6 +314,7 @@ func parsePhotoItems(list []interface{}) []Photo {
 				URL:         photoURL,
 				Width:       w,
 				Height:      h,
+				IsVideo:     itemIsVideo(itemArr),
 				TakenAt:     timestamp,
 				Description: description,
 			})
@@ -320,6 +322,35 @@ func parsePhotoItems(list []interface{}) []Photo {
 	}
 
 	return photos
+}
+
+// itemIsVideo reports whether a scraped album item is a video, based on the
+// item's embedded media metadata. Google marks video items with a video-info
+// object (key "76647426") whose media-type element equals 4, e.g.
+//
+//	"76647426":[46929,null,1080,1920,null,4,134,null,[[1,null,1080,1920]],...]
+//
+// Photos and motion-photo containers do not carry this object. The key name is
+// opaque, so every metadata object is scanned for the video shape instead of
+// relying on the key alone.
+func itemIsVideo(itemArr []interface{}) bool {
+	for _, part := range itemArr {
+		meta, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, v := range meta {
+			entry, ok := v.([]interface{})
+			if !ok || len(entry) < 6 {
+				continue
+			}
+			mediaType, ok := entry[5].(float64)
+			if ok && mediaType == 4 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // wizTokens holds Google session tokens needed for pagination requests
@@ -723,6 +754,83 @@ func isImageMagicBytes(data []byte) bool {
 		return true
 	}
 	return false
+}
+
+// ItemMedia is the fully classified result of downloading one album item.
+type ItemMedia struct {
+	Kind      string // "image", "video" or "live"
+	Data      []byte // primary asset bytes
+	Ext       string // extension for the primary asset, including the dot
+	VideoData []byte // motion/live video component, nil for plain images and videos
+	VideoExt  string // extension of the video component, including the dot
+}
+
+// DownloadItemMedia downloads one album item and classifies it using both the
+// item metadata from the album scrape and the downloaded bytes.
+//
+// Video items are authoritatively marked in the album data (Photo.IsVideo).
+// Their =d endpoint serves a JPEG poster frame, and =dv serves the actual
+// stream, which may still carry Apple Live Photo metadata tags even though it
+// is a standalone video: iPhone clips shared to Google Photos keep those tags.
+// Byte-based sniffing alone therefore misclassifies iPhone videos as live
+// photo sidecars, so the item metadata decides first and the bytes only
+// validate the result.
+func DownloadItemMedia(ctx context.Context, client *Client, p Photo) (ItemMedia, error) {
+	if p.IsVideo {
+		return downloadVideoItem(ctx, client, p)
+	}
+	return downloadImageItem(ctx, client, p)
+}
+
+// downloadVideoItem fetches the playable stream of a video item. =d serves a
+// poster frame for most shared-album videos, so =dv is the payload of record.
+func downloadVideoItem(ctx context.Context, client *Client, p Photo) (ItemMedia, error) {
+	data, ext, isVideo, _, err := DownloadMedia(ctx, client, p.URL)
+	if err != nil {
+		return ItemMedia{}, err
+	}
+	if isVideo {
+		return ItemMedia{Kind: "video", Data: data, Ext: ext}, nil
+	}
+	// DownloadMedia classified the poster as a live photo or plain image.
+	// The album metadata says otherwise: fetch the =dv stream directly.
+	sidecarData, sidecarExt, err := DownloadMotionVideoSidecar(ctx, client, p.URL)
+	if err != nil {
+		return ItemMedia{}, fmt.Errorf("item is a video per album metadata but video download failed: %w", err)
+	}
+	if !isVideoMagicBytes(sidecarData) {
+		return ItemMedia{}, fmt.Errorf("item is a video per album metadata but =dv did not return video bytes (ext %s)", sidecarExt)
+	}
+	if sidecarExt == "" {
+		sidecarExt = ".mp4"
+	}
+	return ItemMedia{Kind: "video", Data: sidecarData, Ext: sidecarExt}, nil
+}
+
+// downloadImageItem fetches a photo item and detects sidecar live photo
+// video, preserving live-photo pairing behaviour for photos.
+func downloadImageItem(ctx context.Context, client *Client, p Photo) (ItemMedia, error) {
+	data, ext, isVideo, isLive, err := DownloadMedia(ctx, client, p.URL)
+	if err != nil {
+		return ItemMedia{}, err
+	}
+	if isVideo {
+		// Album metadata says photo, but the bytes are video (e.g. Google
+		// served a direct stream): trust the bytes for the primary asset.
+		return ItemMedia{Kind: "video", Data: data, Ext: ext}, nil
+	}
+	if !isLive {
+		return ItemMedia{Kind: "image", Data: data, Ext: ext}, nil
+	}
+	// Live photo: the image is the primary asset, and its =dv sidecar holds
+	// the paired video. The sidecar is fetched separately so the video bytes
+	// are available for the live-photo upload pair.
+	sidecarData, sidecarExt, err := DownloadMotionVideoSidecar(ctx, client, p.URL)
+	if err != nil {
+		// Keep the image as a plain photo when the sidecar is unavailable.
+		return ItemMedia{Kind: "image", Data: data, Ext: ext}, nil
+	}
+	return ItemMedia{Kind: "live", Data: data, Ext: ext, VideoData: sidecarData, VideoExt: sidecarExt}, nil
 }
 
 // DownloadMedia downloads original media from Google Photos.
