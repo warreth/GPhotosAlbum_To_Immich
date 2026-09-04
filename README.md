@@ -76,4 +76,10 @@ go run main.go
 
 # Run with Docker (build from source)
 sudo docker compose up --build --remove-orphans
+
+# Run tests (offline; integration tests are skipped)
+go test ./...
+
+# Run tests including live integration tests against the real test album
+GP2IMMICH_INTEGRATION=1 go test ./... -timeout 15m
 ```
